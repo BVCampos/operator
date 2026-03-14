@@ -9,13 +9,13 @@ Operator wraps `claude --print` in bash loops that persist state between iterati
 One line:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bcampos/operator/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BVCampos/operator/main/install.sh | bash
 ```
 
 Or clone manually:
 
 ```bash
-git clone https://github.com/bcampos/operator.git ~/.operator/repo
+git clone https://github.com/BVCampos/operator.git ~/.operator/repo
 ~/.operator/repo/install.sh
 ```
 

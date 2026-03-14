@@ -35,7 +35,7 @@ Examples:
   operator audit full --max 5         Audit, verify, and fix (5 each)
   operator ralph start --prd tasks/feature.md --tool claude --max 20
 
-Documentation: https://github.com/bcampos/operator
+Documentation: https://github.com/BVCampos/operator
 EOF
 }
 

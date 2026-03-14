@@ -1,11 +1,11 @@
 #!/bin/bash
 # Install operator — autonomous AI coding loops
-# curl -fsSL https://raw.githubusercontent.com/bcampos/operator/main/install.sh | bash
+# curl -fsSL https://raw.githubusercontent.com/BVCampos/operator/main/install.sh | bash
 
 set -e
 
 OPERATOR_HOME="$HOME/.operator"
-REPO_URL="https://github.com/bcampos/operator.git"
+REPO_URL="https://github.com/BVCampos/operator.git"
 
 echo ""
 echo "  Installing operator — autonomous AI coding loops"
