@@ -1,0 +1,216 @@
+#!/bin/bash
+# audit-loop — Systematically audit the codebase section by section
+# Usage: audit-loop [--max N]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+AUDIT_PROMPT="$PROMPTS_DIR/audit-phase.md"
+
+# Logging
+LOG_DIR="$HOME/.operator/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/audit-loop-$(date +%Y%m%d-%H%M%S).log"
+
+log() {
+  local msg="[$(date '+%H:%M:%S')] $1"
+  echo "$msg"
+  echo "$msg" >> "$LOG_FILE"
+}
+
+spin() {
+  local pid=$1
+  local label=$2
+  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  local start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
+    sleep 0.1
+  done
+  local total=$(( SECONDS - start ))
+  local mins=$(( total / 60 ))
+  local secs=$(( total % 60 ))
+  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
+}
+
+# Defaults
+MAX_ITERATIONS=10
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --max)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: audit-loop [--max N]"
+      echo ""
+      echo "Systematically audits the codebase section by section."
+      echo "Each iteration picks an uncovered section and spawns specialist agents."
+      echo ""
+      echo "Options:"
+      echo "  --max N    Max iterations (default: 10)"
+      echo ""
+      echo "Files created in project root:"
+      echo "  audit-progress.md   Tracks which sections have been audited"
+      echo "  audit-report.md     Cumulative findings across all iterations"
+      echo ""
+      echo "The loop stops early if all sections are covered."
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_ITERATIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate we're in a git repo
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+if ! command -v claude &>/dev/null; then
+  echo "Error: claude CLI is required."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+PROGRESS_FILE="$PROJECT_DIR/audit-progress.md"
+REPORT_FILE="$PROJECT_DIR/audit-report.md"
+
+# Count files in project for context
+TOTAL_FILES=$(find . -type f \( -name "*.ts" -o -name "*.tsx" \) -not -path "*/node_modules/*" -not -path "*/.next/*" 2>/dev/null | wc -l | tr -d ' ')
+
+# Show existing progress if any
+if [ -f "$PROGRESS_FILE" ]; then
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+  PROGRESS_INFO="Resuming: $COVERED done, $REMAINING remaining"
+else
+  PROGRESS_INFO="Fresh audit (no progress file)"
+fi
+
+echo "================================================"
+echo "  Audit Loop — Max iterations: $MAX_ITERATIONS"
+echo "  Project:  $PROJECT_DIR"
+echo "  Branch:   $(git branch --show-current)"
+echo "  Files:    $TOTAL_FILES .ts/.tsx files"
+echo "  Progress: $PROGRESS_INFO"
+echo "  Log:      $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started audit-loop --max $MAX_ITERATIONS"
+log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
+log "Total files: $TOTAL_FILES | $PROGRESS_INFO"
+
+START_TIME=$(date +%s)
+
+for i in $(seq 1 $MAX_ITERATIONS); do
+  echo ""
+  echo "==============================================================="
+  echo "  Audit iteration $i of $MAX_ITERATIONS"
+  echo "==============================================================="
+  echo ""
+
+  # Show current progress
+  if [ -f "$PROGRESS_FILE" ]; then
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+    log "Progress: $COVERED sections done, $REMAINING remaining"
+  fi
+
+  # Run audit
+  AUDIT_OUT=$(mktemp)
+  command claude --dangerously-skip-permissions --print < "$AUDIT_PROMPT" > "$AUDIT_OUT" 2>&1 &
+  CLAUDE_PID=$!
+  log "Claude audit started (PID: $CLAUDE_PID)"
+
+  spin $CLAUDE_PID "Auditing codebase"
+
+  wait $CLAUDE_PID || true
+  OUTPUT=$(cat "$AUDIT_OUT")
+  rm -f "$AUDIT_OUT"
+
+  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+  log "Audit output: $LINES lines"
+
+  # Show the output
+  echo ""
+  echo "$OUTPUT"
+  echo "$OUTPUT" >> "$LOG_FILE"
+
+  # Check for completion
+  if echo "$OUTPUT" | grep -q "<audit>COMPLETE</audit>"; then
+    END_TIME=$(date +%s)
+    ELAPSED=$(( END_TIME - START_TIME ))
+    ELAPSED_MIN=$(( ELAPSED / 60 ))
+    ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+    echo ""
+    log "================================================"
+    log "  Audit COMPLETE!"
+    log "  All sections audited in $i iterations (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+    log "================================================"
+
+    if [ -f "$REPORT_FILE" ]; then
+      CRITICAL=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null || echo "0")
+      IMPORTANT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null || echo "0")
+      log "Report: $REPORT_FILE"
+      log "Progress: $PROGRESS_FILE"
+    fi
+    exit 0
+  fi
+
+  # Show progress summary after each iteration
+  if [ -f "$PROGRESS_FILE" ]; then
+    echo ""
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    TOTAL_SECTIONS=$(( COVERED + REMAINING ))
+    log "Progress: $COVERED/$TOTAL_SECTIONS sections audited"
+  fi
+
+  if [ -f "$REPORT_FILE" ]; then
+    REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+    log "Report size: $REPORT_LINES lines"
+  fi
+
+  echo ""
+  log "Iteration $i complete."
+  sleep 2
+done
+
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME ))
+ELAPSED_MIN=$(( ELAPSED / 60 ))
+ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+echo ""
+log "================================================"
+log "  Reached max iterations ($MAX_ITERATIONS)."
+log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
+if [ -f "$PROGRESS_FILE" ]; then
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  log "  Sections: $COVERED done, $REMAINING remaining"
+fi
+log "  Report: $REPORT_FILE"
+log "  Progress: $PROGRESS_FILE"
+log "  Full log: $LOG_FILE"
+log "================================================"
+exit 1

@@ -1,0 +1,38 @@
+#!/bin/bash
+# ralph-logs — Attach to a running Ralph session or tail its log
+# Usage: ralph-logs <name> [--tail]
+
+if [ -z "$1" ]; then
+  echo "Usage: ralph-logs <name> [--tail]"
+  echo ""
+  echo "  ralph-logs auth        Attach to tmux session (interactive, Ctrl+B D to detach)"
+  echo "  ralph-logs auth --tail Tail the log file (read-only)"
+  exit 1
+fi
+
+NAME="$1"
+SESSION_ID="ralph-$NAME"
+OPERATOR_STATE="$HOME/.operator"
+SESSIONS_FILE="$OPERATOR_STATE/sessions.json"
+LOG_FILE="$OPERATOR_STATE/logs/$SESSION_ID.log"
+
+if [ "$2" == "--tail" ]; then
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "No log file found for '$NAME'"
+    exit 1
+  fi
+  tail -f "$LOG_FILE"
+  exit 0
+fi
+
+if tmux has-session -t "$SESSION_ID" 2>/dev/null; then
+  echo "Attaching to $SESSION_ID... (Ctrl+B then D to detach)"
+  tmux attach-session -t "$SESSION_ID"
+else
+  echo "Session '$SESSION_ID' is not running."
+  if [ -f "$LOG_FILE" ]; then
+    echo "Showing last 50 lines of log:"
+    echo ""
+    tail -50 "$LOG_FILE"
+  fi
+fi

@@ -1,0 +1,131 @@
+#!/bin/bash
+# operator — Autonomous AI coding loops
+# Usage: operator <command> [subcommand] [options]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERSION="1.0.0"
+
+show_help() {
+  cat <<EOF
+operator v$VERSION — Autonomous AI coding loops for Claude Code
+
+Usage: operator <command> [options]
+
+Commands:
+  review [--max N]                    Review + fix loop on current branch
+  audit                               Systematic codebase audit
+  audit verify                        Verify audit findings before fixing
+  audit fix                           Fix confirmed audit findings
+  audit full                          Audit → verify → fix pipeline
+  ralph start --prd <file.md>         Start Ralph loop from PRD
+  ralph status                        List Ralph sessions
+  ralph logs <name>                   Attach to Ralph session
+  ralph stop <name>                   Stop a Ralph session
+  ralph clean <name>                  Clean up after merge
+
+Options:
+  --help, -h                          Show this help
+  --version, -v                       Show version
+
+Examples:
+  operator review --max 5             Review and fix PR, up to 5 iterations
+  operator audit --max 10             Audit 10 sections of the codebase
+  operator audit full --max 5         Audit, verify, and fix (5 each)
+  operator ralph start --prd tasks/feature.md --tool claude --max 20
+
+Documentation: https://github.com/bcampos/operator
+EOF
+}
+
+if [ $# -eq 0 ]; then
+  show_help
+  exit 0
+fi
+
+COMMAND="$1"
+shift
+
+case "$COMMAND" in
+  review)
+    exec "$SCRIPT_DIR/review-loop" "$@"
+    ;;
+
+  audit)
+    if [ $# -eq 0 ]; then
+      exec "$SCRIPT_DIR/audit-loop" "$@"
+    fi
+
+    SUBCMD="$1"
+    shift
+
+    case "$SUBCMD" in
+      verify)
+        exec "$SCRIPT_DIR/audit-verify" "$@"
+        ;;
+      fix)
+        exec "$SCRIPT_DIR/audit-fix" "$@"
+        ;;
+      full)
+        exec "$SCRIPT_DIR/audit-loop-fix" "$@"
+        ;;
+      --*)
+        # Flag passed directly to audit-loop (e.g., operator audit --max 5)
+        exec "$SCRIPT_DIR/audit-loop" "$SUBCMD" "$@"
+        ;;
+      *)
+        # Number passed directly (e.g., operator audit 5)
+        exec "$SCRIPT_DIR/audit-loop" "$SUBCMD" "$@"
+        ;;
+    esac
+    ;;
+
+  ralph)
+    if [ $# -eq 0 ]; then
+      echo "Usage: operator ralph <start|status|logs|stop|clean> [options]"
+      exit 1
+    fi
+
+    SUBCMD="$1"
+    shift
+
+    case "$SUBCMD" in
+      start)
+        exec "$SCRIPT_DIR/ralph-start" "$@"
+        ;;
+      status)
+        exec "$SCRIPT_DIR/ralph-status" "$@"
+        ;;
+      logs)
+        exec "$SCRIPT_DIR/ralph-logs" "$@"
+        ;;
+      stop)
+        exec "$SCRIPT_DIR/ralph-stop" "$@"
+        ;;
+      clean)
+        exec "$SCRIPT_DIR/ralph-clean" "$@"
+        ;;
+      *)
+        echo "Unknown ralph command: $SUBCMD"
+        echo "Available: start, status, logs, stop, clean"
+        exit 1
+        ;;
+    esac
+    ;;
+
+  --help|-h|help)
+    show_help
+    ;;
+
+  --version|-v|version)
+    echo "operator v$VERSION"
+    ;;
+
+  *)
+    echo "Unknown command: $COMMAND"
+    echo ""
+    show_help
+    exit 1
+    ;;
+esac

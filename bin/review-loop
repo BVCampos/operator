@@ -1,0 +1,256 @@
+#!/bin/bash
+# review-loop — Review PR, fix issues, repeat until clean
+# Usage: review-loop [--max N] [--review-only] [--fix-only]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+REVIEW_PROMPT="$PROMPTS_DIR/review-phase.md"
+FIX_PROMPT="$PROMPTS_DIR/fix-phase.md"
+
+# Logging
+LOG_DIR="$HOME/.operator/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/review-loop-$(date +%Y%m%d-%H%M%S).log"
+
+log() {
+  local msg="[$(date '+%H:%M:%S')] $1"
+  echo "$msg"
+  echo "$msg" >> "$LOG_FILE"
+}
+
+# Spinner that runs in background while claude is working
+spin() {
+  local pid=$1
+  local label=$2
+  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  local start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
+    sleep 0.1
+  done
+  local total=$(( SECONDS - start ))
+  local mins=$(( total / 60 ))
+  local secs=$(( total % 60 ))
+  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
+}
+
+# Defaults
+MAX_ITERATIONS=3
+
+# Parse arguments
+REVIEW_ONLY=false
+FIX_ONLY=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --max)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    --review-only)
+      REVIEW_ONLY=true
+      shift
+      ;;
+    --fix-only)
+      FIX_ONLY=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: review-loop [--max N] [--review-only] [--fix-only]"
+      echo ""
+      echo "Runs a review → fix loop on the current branch's changes."
+      echo ""
+      echo "Options:"
+      echo "  --max N          Max iterations (default: 3)"
+      echo "  --review-only    Only run the review phase (no fixes)"
+      echo "  --fix-only       Only run the fix phase (assumes review-report.md exists)"
+      echo ""
+      echo "The loop stops early if the review finds no critical/important issues."
+      exit 0
+      ;;
+    *)
+      # Assume it's max_iterations if it's a number
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_ITERATIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate we're in a git repo
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+# Check prerequisites
+if ! command -v claude &>/dev/null; then
+  echo "Error: claude CLI is required."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+CHANGED_FILES=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
+STAGED_FILES=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
+BRANCH_DIFF=$(git diff main...HEAD --name-only 2>/dev/null | wc -l | tr -d ' ')
+
+echo "================================================"
+echo "  Review Loop — Max iterations: $MAX_ITERATIONS"
+echo "  Project: $PROJECT_DIR"
+echo "  Branch:  $(git branch --show-current)"
+echo "  Log:     $LOG_FILE"
+echo "  Changed: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
+echo "================================================"
+echo ""
+CHANGELOG="$PROJECT_DIR/review-changelog.md"
+
+log "Started review-loop --max $MAX_ITERATIONS"
+log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
+log "Files: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
+log "Changelog: $CHANGELOG"
+
+for i in $(seq 1 $MAX_ITERATIONS); do
+  echo ""
+  echo "==============================================================="
+  echo "  Iteration $i of $MAX_ITERATIONS"
+  echo "==============================================================="
+
+  # Phase 1: Review
+  if [ "$FIX_ONLY" = false ]; then
+    echo ""
+    log "--- Phase 1: REVIEW ---"
+    echo ""
+
+    # Run claude in background, capture output to temp file
+    REVIEW_OUT=$(mktemp)
+    command claude --dangerously-skip-permissions --print < "$REVIEW_PROMPT" > "$REVIEW_OUT" 2>&1 &
+    CLAUDE_PID=$!
+    log "Claude review started (PID: $CLAUDE_PID)"
+
+    # Show spinner while claude works
+    spin $CLAUDE_PID "Reviewing code"
+
+    # Wait for exit code
+    wait $CLAUDE_PID || true
+    OUTPUT=$(cat "$REVIEW_OUT")
+    rm -f "$REVIEW_OUT"
+
+    # Log a preview of the output
+    LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+    log "Review output: $LINES lines"
+
+    # Show the output
+    echo ""
+    echo "$OUTPUT"
+    echo "$OUTPUT" >> "$LOG_FILE"
+
+    # Check for clean signal
+    if echo "$OUTPUT" | grep -q "<review>CLEAN</review>"; then
+      echo ""
+      log "================================================"
+      log "  Review is CLEAN! No critical/important issues."
+      log "  Completed at iteration $i of $MAX_ITERATIONS"
+      log "================================================"
+      if [ -f "$CHANGELOG" ]; then
+        echo ""
+        log "Changelog: $CHANGELOG"
+        ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null || echo "0")
+        log "Total entries: $ITER_COUNT"
+      fi
+      exit 0
+    fi
+
+    # Verify review report was created
+    if [ ! -f "$PROJECT_DIR/review-report.md" ]; then
+      log "Warning: review-report.md was not created. The review may have failed."
+      log "Continuing to next iteration..."
+      continue
+    fi
+
+    # Show summary from the report
+    if [ -f "$PROJECT_DIR/review-report.md" ]; then
+      echo ""
+      log "Review report saved to review-report.md"
+      SUMMARY=$(grep -A5 "## Summary" "$PROJECT_DIR/review-report.md" 2>/dev/null || echo "  (no summary section found)")
+      echo "$SUMMARY"
+    fi
+
+    if [ "$REVIEW_ONLY" = true ]; then
+      echo ""
+      log "Review-only mode. Run 'review-loop --fix-only' to fix the issues."
+      exit 0
+    fi
+  fi
+
+  # Phase 2: Fix
+  echo ""
+  log "--- Phase 2: FIX ---"
+  echo ""
+
+  if [ ! -f "$PROJECT_DIR/review-report.md" ]; then
+    log "Error: No review-report.md found. Run without --fix-only first."
+    exit 1
+  fi
+
+  # Run claude in background
+  FIX_OUT=$(mktemp)
+  command claude --dangerously-skip-permissions --print < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
+  CLAUDE_PID=$!
+  log "Claude fix started (PID: $CLAUDE_PID)"
+
+  # Show spinner
+  spin $CLAUDE_PID "Fixing issues"
+
+  wait $CLAUDE_PID || true
+  OUTPUT=$(cat "$FIX_OUT")
+  rm -f "$FIX_OUT"
+
+  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+  log "Fix output: $LINES lines"
+
+  # Show the output
+  echo ""
+  echo "$OUTPUT"
+  echo "$OUTPUT" >> "$LOG_FILE"
+
+  # Show git status after fixes
+  echo ""
+  log "Git status after fix:"
+  CHANGED_AFTER=$(git diff --name-only 2>/dev/null)
+  if [ -n "$CHANGED_AFTER" ]; then
+    echo "$CHANGED_AFTER" | while read -r f; do log "  modified: $f"; done
+  fi
+  COMMITTED=$(git log --oneline -1 2>/dev/null)
+  log "Latest commit: $COMMITTED"
+
+  # Reset fix-only flag after first iteration
+  FIX_ONLY=false
+
+  echo ""
+  log "Iteration $i complete."
+  sleep 2
+done
+
+echo ""
+log "================================================"
+log "  Reached max iterations ($MAX_ITERATIONS)."
+log "  Check review-report.md for remaining issues."
+log "  Full log: $LOG_FILE"
+if [ -f "$CHANGELOG" ]; then
+  ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null || echo "0")
+  log "  Changelog: $CHANGELOG ($ITER_COUNT entries)"
+fi
+log "================================================"
+exit 1

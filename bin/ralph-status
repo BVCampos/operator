@@ -1,0 +1,63 @@
+#!/bin/bash
+# ralph-status — Show all Ralph sessions and their state
+
+OPERATOR_STATE="$HOME/.operator"
+SESSIONS_FILE="$OPERATOR_STATE/sessions.json"
+
+if [ ! -f "$SESSIONS_FILE" ] || [ "$(jq length "$SESSIONS_FILE")" -eq 0 ]; then
+  echo "No Ralph sessions."
+  exit 0
+fi
+
+echo "Ralph Sessions"
+echo "=============="
+echo ""
+
+jq -r '.[] | "\(.id)\t\(.name)\t\(.project)\t\(.branch)\t\(.tool)\t\(.max_iterations)\t\(.started)\t\(.log)\t\(.worktree)"' "$SESSIONS_FILE" | \
+while IFS=$'\t' read -r id name project branch tool max started log worktree; do
+  if tmux has-session -t "$id" 2>/dev/null; then
+    STATUS="RUNNING"
+    ICON="●"
+
+    # Try to get iteration info from log
+    if [ -f "$log" ]; then
+      LAST_ITER=$(grep -o "Ralph Iteration [0-9]* of [0-9]*" "$log" 2>/dev/null | tail -1)
+      if [ -n "$LAST_ITER" ]; then
+        ITER_INFO="  $LAST_ITER"
+      else
+        ITER_INFO=""
+      fi
+    else
+      ITER_INFO=""
+    fi
+
+    # Check stories progress from prd.json in worktree
+    PRD_PATH="$worktree/scripts/ralph/prd.json"
+    if [ -f "$PRD_PATH" ]; then
+      TOTAL=$(jq '.userStories | length' "$PRD_PATH" 2>/dev/null || echo "?")
+      DONE=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_PATH" 2>/dev/null || echo "?")
+      STORY_INFO="  stories: $DONE/$TOTAL"
+    else
+      STORY_INFO=""
+    fi
+  else
+    # Check if it completed successfully
+    if [ -f "$log" ] && grep -q "completed all tasks" "$log" 2>/dev/null; then
+      STATUS="DONE"
+      ICON="✓"
+    else
+      STATUS="STOPPED"
+      ICON="○"
+    fi
+    ITER_INFO=""
+    STORY_INFO=""
+  fi
+
+  echo "$ICON $name  [$STATUS]  $branch"
+  echo "  project:  $project"
+  echo "  tool:     $tool (max: $max)"
+  echo "  started:  $started"
+  [ -n "$ITER_INFO" ] && echo " $ITER_INFO"
+  [ -n "$STORY_INFO" ] && echo " $STORY_INFO"
+  echo ""
+done

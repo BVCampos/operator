@@ -1,0 +1,218 @@
+#!/bin/bash
+# audit-verify — Verify audit findings before fixing
+# Usage: audit-verify [--max N]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+VERIFY_PROMPT="$PROMPTS_DIR/audit-verify-phase.md"
+
+# Logging
+LOG_DIR="$HOME/.operator/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/audit-verify-$(date +%Y%m%d-%H%M%S).log"
+
+log() {
+  local msg="[$(date '+%H:%M:%S')] $1"
+  echo "$msg"
+  echo "$msg" >> "$LOG_FILE"
+}
+
+spin() {
+  local pid=$1
+  local label=$2
+  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  local start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
+    sleep 0.1
+  done
+  local total=$(( SECONDS - start ))
+  local mins=$(( total / 60 ))
+  local secs=$(( total % 60 ))
+  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
+}
+
+# Defaults
+MAX_ITERATIONS=10
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --max)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: audit-verify [--max N]"
+      echo ""
+      echo "Verifies audit findings are real before fixing."
+      echo "Run after audit-loop, before audit-fix."
+      echo ""
+      echo "Options:"
+      echo "  --max N    Max iterations (default: 10)"
+      echo ""
+      echo "Files:"
+      echo "  audit-report.md            Input (required)"
+      echo "  audit-report-verified.md   Output — findings with verdicts"
+      echo "  audit-verify-progress.md   Tracks which sections are verified"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_ITERATIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+if ! command -v claude &>/dev/null; then
+  echo "Error: claude CLI is required."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+REPORT_FILE="$PROJECT_DIR/audit-report.md"
+PROGRESS_FILE="$PROJECT_DIR/audit-verify-progress.md"
+VERIFIED_FILE="$PROJECT_DIR/audit-report-verified.md"
+
+if [ ! -f "$REPORT_FILE" ]; then
+  echo "Error: No audit-report.md found."
+  echo "Run 'audit-loop' first to generate the audit report."
+  exit 1
+fi
+
+REPORT_SECTIONS=$(grep -c "^## " "$REPORT_FILE" 2>/dev/null || echo "0")
+REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+
+# Show existing progress
+if [ -f "$PROGRESS_FILE" ]; then
+  VERIFIED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+  PROGRESS_INFO="Resuming: $VERIFIED verified, $REMAINING remaining"
+else
+  PROGRESS_INFO="Fresh run (all sections unverified)"
+fi
+
+echo "================================================"
+echo "  Audit Verify — Max iterations: $MAX_ITERATIONS"
+echo "  Project:    $PROJECT_DIR"
+echo "  Report:     $REPORT_FILE ($REPORT_LINES lines, $REPORT_SECTIONS sections)"
+echo "  Progress:   $PROGRESS_INFO"
+echo "  Log:        $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started audit-verify --max $MAX_ITERATIONS"
+log "Project: $PROJECT_DIR | Report: $REPORT_SECTIONS sections, $REPORT_LINES lines"
+log "$PROGRESS_INFO"
+
+START_TIME=$(date +%s)
+
+for i in $(seq 1 $MAX_ITERATIONS); do
+  echo ""
+  echo "==============================================================="
+  echo "  Verify iteration $i of $MAX_ITERATIONS"
+  echo "==============================================================="
+  echo ""
+
+  if [ -f "$PROGRESS_FILE" ]; then
+    VERIFIED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+    log "Progress: $VERIFIED sections verified, $REMAINING remaining"
+  fi
+
+  # Run verification
+  VERIFY_OUT=$(mktemp)
+  command claude --dangerously-skip-permissions --print < "$VERIFY_PROMPT" > "$VERIFY_OUT" 2>&1 &
+  CLAUDE_PID=$!
+  log "Claude verify started (PID: $CLAUDE_PID)"
+
+  spin $CLAUDE_PID "Verifying findings"
+
+  wait $CLAUDE_PID || true
+  OUTPUT=$(cat "$VERIFY_OUT")
+  rm -f "$VERIFY_OUT"
+
+  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+  log "Verify output: $LINES lines"
+
+  echo ""
+  echo "$OUTPUT"
+  echo "$OUTPUT" >> "$LOG_FILE"
+
+  # Check for completion
+  if echo "$OUTPUT" | grep -q "<verify>COMPLETE</verify>"; then
+    END_TIME=$(date +%s)
+    ELAPSED=$(( END_TIME - START_TIME ))
+    ELAPSED_MIN=$(( ELAPSED / 60 ))
+    ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+    echo ""
+    log "================================================"
+    log "  Verification COMPLETE!"
+    log "  All sections verified in $i iterations (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+    log "================================================"
+
+    if [ -f "$VERIFIED_FILE" ]; then
+      CONFIRMED=$(grep -ci "CONFIRMED" "$VERIFIED_FILE" 2>/dev/null || echo "0")
+      FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$VERIFIED_FILE" 2>/dev/null || echo "0")
+      DUPES=$(grep -ci "DUPLICATE" "$VERIFIED_FILE" 2>/dev/null || echo "0")
+      BY_DESIGN=$(grep -ci "BY_DESIGN" "$VERIFIED_FILE" 2>/dev/null || echo "0")
+      log "  Confirmed: $CONFIRMED"
+      log "  False positives: $FALSE_POS"
+      log "  Duplicates: $DUPES"
+      log "  By design: $BY_DESIGN"
+      log "  Verified report: $VERIFIED_FILE"
+    fi
+    exit 0
+  fi
+
+  # Show progress
+  if [ -f "$PROGRESS_FILE" ]; then
+    echo ""
+    VERIFIED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    TOTAL_SECTIONS=$(( VERIFIED + REMAINING ))
+    log "Progress: $VERIFIED/$TOTAL_SECTIONS sections verified"
+  fi
+
+  echo ""
+  log "Iteration $i complete."
+  sleep 2
+done
+
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME ))
+ELAPSED_MIN=$(( ELAPSED / 60 ))
+ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+echo ""
+log "================================================"
+log "  Reached max iterations ($MAX_ITERATIONS)."
+log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
+if [ -f "$PROGRESS_FILE" ]; then
+  VERIFIED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  log "  Sections: $VERIFIED verified, $REMAINING remaining"
+fi
+log "  Verified report: $VERIFIED_FILE"
+log "  Full log: $LOG_FILE"
+log "================================================"
+exit 1

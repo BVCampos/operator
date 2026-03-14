@@ -1,0 +1,228 @@
+#!/bin/bash
+# audit-fix — Fix findings from audit-report.md section by section
+# Usage: audit-fix [--max N]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+FIX_PROMPT="$PROMPTS_DIR/audit-fix-phase.md"
+
+# Logging
+LOG_DIR="$HOME/.operator/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/audit-fix-$(date +%Y%m%d-%H%M%S).log"
+
+log() {
+  local msg="[$(date '+%H:%M:%S')] $1"
+  echo "$msg"
+  echo "$msg" >> "$LOG_FILE"
+}
+
+spin() {
+  local pid=$1
+  local label=$2
+  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+  local start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local mins=$(( elapsed / 60 ))
+    local secs=$(( elapsed % 60 ))
+    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
+    sleep 0.1
+  done
+  local total=$(( SECONDS - start ))
+  local mins=$(( total / 60 ))
+  local secs=$(( total % 60 ))
+  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
+}
+
+# Defaults
+MAX_ITERATIONS=10
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --max)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: audit-fix [--max N]"
+      echo ""
+      echo "Fixes findings from audit-report.md section by section."
+      echo "Run audit-loop first to generate the report."
+      echo ""
+      echo "Options:"
+      echo "  --max N    Max iterations (default: 10)"
+      echo ""
+      echo "Files:"
+      echo "  audit-report.md          Input — findings from audit-loop (required)"
+      echo "  audit-fix-progress.md    Tracks which sections have been fixed"
+      echo "  audit-fix-changelog.md   Cumulative log of what was fixed"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_ITERATIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Validate
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+if ! command -v claude &>/dev/null; then
+  echo "Error: claude CLI is required."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+# Prefer verified report if it exists
+if [ -f "$PROJECT_DIR/audit-report-verified.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/audit-report-verified.md"
+  log "Using verified report: audit-report-verified.md"
+elif [ -f "$PROJECT_DIR/audit-report.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/audit-report.md"
+  log "Using unverified report: audit-report.md (run audit-verify first for better results)"
+else
+  echo "Error: No audit report found."
+  echo "Run 'audit-loop' first to generate the audit report."
+  exit 1
+fi
+PROGRESS_FILE="$PROJECT_DIR/audit-fix-progress.md"
+CHANGELOG_FILE="$PROJECT_DIR/audit-fix-changelog.md"
+
+# Count findings in report
+REPORT_SECTIONS=$(grep -c "^## " "$REPORT_FILE" 2>/dev/null || echo "0")
+CRITICAL_COUNT=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null || echo "0")
+IMPORTANT_COUNT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null || echo "0")
+
+# Show existing fix progress if any
+if [ -f "$PROGRESS_FILE" ]; then
+  FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+  PROGRESS_INFO="Resuming: $FIXED fixed, $REMAINING remaining"
+else
+  PROGRESS_INFO="Fresh run (all sections unfixed)"
+fi
+
+echo "================================================"
+echo "  Audit Fix — Max iterations: $MAX_ITERATIONS"
+echo "  Project:    $PROJECT_DIR"
+echo "  Branch:     $(git branch --show-current)"
+echo "  Report:     $REPORT_FILE ($REPORT_SECTIONS sections)"
+echo "  Progress:   $PROGRESS_INFO"
+echo "  Log:        $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started audit-fix --max $MAX_ITERATIONS"
+log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
+log "Report: $REPORT_SECTIONS sections | $PROGRESS_INFO"
+
+START_TIME=$(date +%s)
+
+for i in $(seq 1 $MAX_ITERATIONS); do
+  echo ""
+  echo "==============================================================="
+  echo "  Fix iteration $i of $MAX_ITERATIONS"
+  echo "==============================================================="
+  echo ""
+
+  # Show current progress
+  if [ -f "$PROGRESS_FILE" ]; then
+    FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+    log "Progress: $FIXED sections fixed, $REMAINING remaining"
+  fi
+
+  # Run fix
+  FIX_OUT=$(mktemp)
+  command claude --dangerously-skip-permissions --print < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
+  CLAUDE_PID=$!
+  log "Claude fix started (PID: $CLAUDE_PID)"
+
+  spin $CLAUDE_PID "Fixing audit findings"
+
+  wait $CLAUDE_PID || true
+  OUTPUT=$(cat "$FIX_OUT")
+  rm -f "$FIX_OUT"
+
+  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+  log "Fix output: $LINES lines"
+
+  # Show the output
+  echo ""
+  echo "$OUTPUT"
+  echo "$OUTPUT" >> "$LOG_FILE"
+
+  # Show git status after fixes
+  echo ""
+  COMMITTED=$(git log --oneline -1 2>/dev/null)
+  log "Latest commit: $COMMITTED"
+
+  # Check for completion
+  if echo "$OUTPUT" | grep -q "<audit-fix>COMPLETE</audit-fix>"; then
+    END_TIME=$(date +%s)
+    ELAPSED=$(( END_TIME - START_TIME ))
+    ELAPSED_MIN=$(( ELAPSED / 60 ))
+    ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+    echo ""
+    log "================================================"
+    log "  All audit findings FIXED!"
+    log "  Completed in $i iterations (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+    log "================================================"
+    log "  Changelog: $CHANGELOG_FILE"
+    log "  Progress:  $PROGRESS_FILE"
+    exit 0
+  fi
+
+  # Show progress summary
+  if [ -f "$PROGRESS_FILE" ]; then
+    echo ""
+    FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    TOTAL_SECTIONS=$(( FIXED + REMAINING ))
+    log "Progress: $FIXED/$TOTAL_SECTIONS sections fixed"
+  fi
+
+  if [ -f "$CHANGELOG_FILE" ]; then
+    CHANGELOG_LINES=$(wc -l < "$CHANGELOG_FILE" | tr -d ' ')
+    log "Changelog: $CHANGELOG_LINES lines"
+  fi
+
+  echo ""
+  log "Iteration $i complete."
+  sleep 2
+done
+
+END_TIME=$(date +%s)
+ELAPSED=$(( END_TIME - START_TIME ))
+ELAPSED_MIN=$(( ELAPSED / 60 ))
+ELAPSED_SEC=$(( ELAPSED % 60 ))
+
+echo ""
+log "================================================"
+log "  Reached max iterations ($MAX_ITERATIONS)."
+log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
+if [ -f "$PROGRESS_FILE" ]; then
+  FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  log "  Sections: $FIXED fixed, $REMAINING remaining"
+fi
+log "  Changelog: $CHANGELOG_FILE"
+log "  Full log:  $LOG_FILE"
+log "================================================"
+exit 1

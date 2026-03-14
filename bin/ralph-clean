@@ -1,0 +1,74 @@
+#!/bin/bash
+# ralph-clean — Remove worktree, branch, and session record after merge
+# Usage: ralph-clean <name> [--force]
+
+if [ -z "$1" ]; then
+  echo "Usage: ralph-clean <name> [--force]"
+  echo ""
+  echo "Removes the worktree, local branch, and session record."
+  echo "Use --force to skip the confirmation prompt."
+  exit 1
+fi
+
+NAME="$1"
+FORCE="$2"
+SESSION_ID="ralph-$NAME"
+OPERATOR_STATE="$HOME/.operator"
+SESSIONS_FILE="$OPERATOR_STATE/sessions.json"
+
+# Get session info
+if [ ! -f "$SESSIONS_FILE" ]; then
+  echo "No sessions file found."
+  exit 1
+fi
+
+WORKTREE=$(jq -r --arg id "$SESSION_ID" '.[] | select(.id == $id) | .worktree' "$SESSIONS_FILE")
+BRANCH=$(jq -r --arg id "$SESSION_ID" '.[] | select(.id == $id) | .branch' "$SESSIONS_FILE")
+PROJECT=$(jq -r --arg id "$SESSION_ID" '.[] | select(.id == $id) | .project' "$SESSIONS_FILE")
+
+if [ -z "$WORKTREE" ] || [ "$WORKTREE" == "null" ]; then
+  echo "No session found for '$NAME'"
+  exit 1
+fi
+
+# Stop session if running
+if tmux has-session -t "$SESSION_ID" 2>/dev/null; then
+  echo "Stopping running session first..."
+  tmux kill-session -t "$SESSION_ID"
+fi
+
+# Confirm unless --force
+if [ "$FORCE" != "--force" ]; then
+  echo "This will remove:"
+  echo "  Worktree: $WORKTREE"
+  echo "  Branch:   $BRANCH"
+  echo "  Session:  $SESSION_ID"
+  echo ""
+  read -p "Continue? (y/N) " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Cancelled."
+    exit 0
+  fi
+fi
+
+# Remove worktree
+if [ -d "$WORKTREE" ]; then
+  echo "Removing worktree..."
+  cd "$PROJECT" && git worktree remove "$WORKTREE" --force 2>/dev/null || rm -rf "$WORKTREE"
+fi
+
+# Delete local branch
+if git -C "$PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH" 2>/dev/null; then
+  echo "Deleting local branch $BRANCH..."
+  git -C "$PROJECT" branch -D "$BRANCH" 2>/dev/null || true
+fi
+
+# Remove from sessions.json
+jq --arg id "$SESSION_ID" 'map(select(.id != $id))' "$SESSIONS_FILE" > "${SESSIONS_FILE}.tmp" \
+  && mv "${SESSIONS_FILE}.tmp" "$SESSIONS_FILE"
+
+# Remove log
+rm -f "$OPERATOR_STATE/logs/$SESSION_ID.log"
+
+echo "Cleaned up '$NAME'."

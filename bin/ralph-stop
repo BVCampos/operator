@@ -1,0 +1,25 @@
+#!/bin/bash
+# ralph-stop — Stop a running Ralph session
+# Usage: ralph-stop <name>
+
+if [ -z "$1" ]; then
+  echo "Usage: ralph-stop <name>"
+  exit 1
+fi
+
+NAME="$1"
+SESSION_ID="ralph-$NAME"
+OPERATOR_STATE="$HOME/.operator"
+SESSIONS_FILE="$OPERATOR_STATE/sessions.json"
+
+if tmux has-session -t "$SESSION_ID" 2>/dev/null; then
+  tmux kill-session -t "$SESSION_ID"
+  echo "Stopped session: $SESSION_ID"
+else
+  echo "Session '$SESSION_ID' is not running."
+fi
+
+echo ""
+echo "Note: Worktree and branch are preserved."
+echo "  Resume:  ralph-start --name $NAME --tool claude"
+echo "  Clean:   ralph-clean $NAME"
