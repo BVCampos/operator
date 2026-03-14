@@ -4,6 +4,8 @@ Autonomous AI coding loops for Claude Code. Run reviews, audits, and full featur
 
 Operator wraps `claude --print` in bash loops that persist state between iterations, so AI agents can systematically work through large tasks — reviewing PRs, auditing codebases, implementing features from PRDs — without manual intervention.
 
+> **Warning:** Operator runs multiple unattended Claude sessions, each consuming significant tokens. A single `operator audit full --max 10` run can use hundreds of thousands of tokens. This tool is intended for **Claude Max plan** subscribers. Usage on metered plans may result in unexpected costs.
+
 ## Install
 
 One line:
