@@ -19,29 +19,7 @@ if [ ! -d "$RALPH_SRC" ]; then
   }
 fi
 
-log() {
-  local msg="[$(date '+%H:%M:%S')] $1"
-  echo "$msg"
-}
-
-spin() {
-  local pid=$1
-  local label=$2
-  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0
-  local start=$SECONDS
-  while kill -0 "$pid" 2>/dev/null; do
-    local elapsed=$(( SECONDS - start ))
-    local mins=$(( elapsed / 60 ))
-    local secs=$(( elapsed % 60 ))
-    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
-    sleep 0.1
-  done
-  local total=$(( SECONDS - start ))
-  local mins=$(( total / 60 ))
-  local secs=$(( total % 60 ))
-  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 # Defaults
 PRD_FILE=""
@@ -135,7 +113,7 @@ NAME="$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed
 WORKTREE_DIR="$PROJECT_DIR/.ralph-worktrees/$NAME"
 BRANCH_NAME="ralph/$NAME"
 SESSION_ID="ralph-$NAME"
-LOG_FILE="$OPERATOR_STATE/logs/$SESSION_ID.log"
+SESSION_LOG="$OPERATOR_STATE/logs/$SESSION_ID.log"
 
 echo ""
 echo "================================================"
@@ -248,16 +226,17 @@ $PRD_CONTENT"
   RESULT=$(cat "$CONVERT_OUT")
   rm -f "$CONVERT_OUT"
 
-  # Extract JSON (in case claude wraps it in markdown fences)
-  JSON_RESULT=$(echo "$RESULT" | sed -n '/^{/,/^}/p')
+  # Extract JSON (strip markdown fences, then capture JSON block)
+  CLEANED=$(echo "$RESULT" | sed '/^```.*$/d')
+  JSON_RESULT=$(echo "$CLEANED" | sed -n '/^{/,/^}/p')
 
-  if [ -z "$JSON_RESULT" ]; then
-    # Try stripping markdown fences
-    JSON_RESULT=$(echo "$RESULT" | sed '1{/^```/d}' | sed '${/^```/d}' | sed -n '/^{/,/^}/p')
+  # Fallback: if initial extraction failed or produced invalid JSON, try greedy extraction
+  if [ -z "$JSON_RESULT" ] || ! echo "$JSON_RESULT" | jq '.' &>/dev/null; then
+    JSON_RESULT=$(echo "$CLEANED" | sed -n '/^{/,$p' | jq '.' 2>/dev/null)
   fi
 
   # Validate JSON
-  if ! echo "$JSON_RESULT" | jq . &>/dev/null; then
+  if [ -z "$JSON_RESULT" ] || ! echo "$JSON_RESULT" | jq . &>/dev/null; then
     echo "Error: Failed to produce valid JSON from PRD conversion."
     echo "Raw output:"
     echo "$RESULT"
@@ -380,7 +359,7 @@ chmod +x "$WRAPPER_SCRIPT"
 # Start tmux session
 log "Launching Ralph in tmux session: $SESSION_ID"
 tmux new-session -d -s "$SESSION_ID" -c "$WORKTREE_DIR" \
-  "script -q '$LOG_FILE' '$WRAPPER_SCRIPT' 2>&1"
+  "script -q '$SESSION_LOG' '$WRAPPER_SCRIPT' 2>&1"
 
 # Verify tmux session started
 sleep 0.5
@@ -402,7 +381,7 @@ jq --arg id "$SESSION_ID" \
    --arg max "$MAX_ITERATIONS" \
    --arg prd "${PRD_FILE:-}" \
    --arg time "$TIMESTAMP" \
-   --arg log "$LOG_FILE" \
+   --arg log "$SESSION_LOG" \
    '. + [{
      "id": $id,
      "name": $name,
@@ -421,7 +400,7 @@ log "Ralph is running!"
 log "  Session:   $SESSION_ID"
 log "  Worktree:  $WORKTREE_DIR"
 log "  Branch:    $BRANCH_NAME"
-log "  Log:       $LOG_FILE"
+log "  Log:       $SESSION_LOG"
 echo ""
 echo "Commands:"
 echo "  ralph-status          List all sessions"

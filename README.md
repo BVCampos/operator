@@ -71,21 +71,15 @@ Files: `audit-report.md`, `audit-progress.md`
 
 ### `operator audit verify` — validate findings
 
-Cross-checks audit findings against the actual code before fixing. Filters out false positives, duplicates, and by-design patterns.
+Spawns one verification agent per section, all running in parallel. Each agent reads the actual code, checks for duplicates across sections, and looks for intentional patterns in project docs.
 
 ```bash
-operator audit verify         # verify all sections
-operator audit verify --max 5
+operator audit verify         # verify all sections in parallel
 ```
-
-Spawns 3 agents per section:
-- **Code Verifier** — confirms the issue exists in the code
-- **Duplicate Checker** — finds duplicates and contradictions across sections
-- **Intent Checker** — reads project docs for "by design" patterns
 
 Each finding gets a verdict: `CONFIRMED`, `FALSE_POSITIVE`, `DUPLICATE`, `BY_DESIGN`, or `WRONG_SEVERITY`.
 
-Files: `audit-report-verified.md`, `audit-verify-progress.md`
+Files: `audit-report-verified.md`
 
 ### `operator audit fix` — fix confirmed findings
 
@@ -103,8 +97,8 @@ Files: `audit-fix-progress.md`, `audit-fix-changelog.md`
 Runs audit → verify → fix in sequence:
 
 ```bash
-operator audit full                       # 10 iterations each
-operator audit full --max 5               # same limit for all
+operator audit full                       # audit and fix: 10 iterations each
+operator audit full --max 5               # audit and fix: 5 iterations each
 operator audit full --audit-max 5 --fix-max 10
 operator audit full --skip-verify         # skip verification
 ```
@@ -171,7 +165,7 @@ Tools create files in your **project root** to track progress:
 |------|-------|
 | `review` | `review-report.md`, `review-changelog.md` |
 | `audit` | `audit-report.md`, `audit-progress.md` |
-| `audit verify` | `audit-report-verified.md`, `audit-verify-progress.md` |
+| `audit verify` | `audit-report-verified.md` |
 | `audit fix` | `audit-fix-progress.md`, `audit-fix-changelog.md` |
 | `ralph` | `.ralph-worktrees/`, `scripts/ralph/prd.json` |
 
@@ -182,7 +176,6 @@ review-changelog.md
 audit-report.md
 audit-progress.md
 audit-report-verified.md
-audit-verify-progress.md
 audit-fix-progress.md
 audit-fix-changelog.md
 .ralph-worktrees/

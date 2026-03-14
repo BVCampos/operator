@@ -8,35 +8,8 @@ OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 FIX_PROMPT="$PROMPTS_DIR/audit-fix-phase.md"
 
-# Logging
-LOG_DIR="$HOME/.operator/logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/audit-fix-$(date +%Y%m%d-%H%M%S).log"
-
-log() {
-  local msg="[$(date '+%H:%M:%S')] $1"
-  echo "$msg"
-  echo "$msg" >> "$LOG_FILE"
-}
-
-spin() {
-  local pid=$1
-  local label=$2
-  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0
-  local start=$SECONDS
-  while kill -0 "$pid" 2>/dev/null; do
-    local elapsed=$(( SECONDS - start ))
-    local mins=$(( elapsed / 60 ))
-    local secs=$(( elapsed % 60 ))
-    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
-    sleep 0.1
-  done
-  local total=$(( SECONDS - start ))
-  local mins=$(( total / 60 ))
-  local secs=$(( total % 60 ))
-  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "audit-fix"
 
 # Defaults
 MAX_ITERATIONS=10
@@ -225,4 +198,4 @@ fi
 log "  Changelog: $CHANGELOG_FILE"
 log "  Full log:  $LOG_FILE"
 log "================================================"
-exit 1
+exit 2

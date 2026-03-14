@@ -2,16 +2,39 @@
 # ralph-clean — Remove worktree, branch, and session record after merge
 # Usage: ralph-clean <name> [--force]
 
-if [ -z "$1" ]; then
+NAME=""
+FORCE=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --force)
+      FORCE="--force"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: ralph-clean <name> [--force]"
+      echo ""
+      echo "Removes the worktree, local branch, and session record."
+      echo "Use --force to skip the confirmation prompt."
+      exit 0
+      ;;
+    *)
+      if [ -z "$NAME" ]; then
+        NAME="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$NAME" ]; then
   echo "Usage: ralph-clean <name> [--force]"
-  echo ""
-  echo "Removes the worktree, local branch, and session record."
-  echo "Use --force to skip the confirmation prompt."
   exit 1
 fi
 
-NAME="$1"
-FORCE="$2"
 SESSION_ID="ralph-$NAME"
 OPERATOR_STATE="$HOME/.operator"
 SESSIONS_FILE="$OPERATOR_STATE/sessions.json"

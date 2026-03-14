@@ -8,35 +8,8 @@ OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 AUDIT_PROMPT="$PROMPTS_DIR/audit-phase.md"
 
-# Logging
-LOG_DIR="$HOME/.operator/logs"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/audit-loop-$(date +%Y%m%d-%H%M%S).log"
-
-log() {
-  local msg="[$(date '+%H:%M:%S')] $1"
-  echo "$msg"
-  echo "$msg" >> "$LOG_FILE"
-}
-
-spin() {
-  local pid=$1
-  local label=$2
-  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0
-  local start=$SECONDS
-  while kill -0 "$pid" 2>/dev/null; do
-    local elapsed=$(( SECONDS - start ))
-    local mins=$(( elapsed / 60 ))
-    local secs=$(( elapsed % 60 ))
-    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
-    sleep 0.1
-  done
-  local total=$(( SECONDS - start ))
-  local mins=$(( total / 60 ))
-  local secs=$(( total % 60 ))
-  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "audit-loop"
 
 # Defaults
 MAX_ITERATIONS=10
@@ -94,7 +67,7 @@ PROGRESS_FILE="$PROJECT_DIR/audit-progress.md"
 REPORT_FILE="$PROJECT_DIR/audit-report.md"
 
 # Count files in project for context
-TOTAL_FILES=$(find . -type f \( -name "*.ts" -o -name "*.tsx" \) -not -path "*/node_modules/*" -not -path "*/.next/*" 2>/dev/null | wc -l | tr -d ' ')
+TOTAL_FILES=$(git ls-files --cached --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
 
 # Show existing progress if any
 if [ -f "$PROGRESS_FILE" ]; then
@@ -109,7 +82,7 @@ echo "================================================"
 echo "  Audit Loop — Max iterations: $MAX_ITERATIONS"
 echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $(git branch --show-current)"
-echo "  Files:    $TOTAL_FILES .ts/.tsx files"
+echo "  Files:    $TOTAL_FILES tracked files"
 echo "  Progress: $PROGRESS_INFO"
 echo "  Log:      $LOG_FILE"
 echo "================================================"
@@ -213,4 +186,4 @@ log "  Report: $REPORT_FILE"
 log "  Progress: $PROGRESS_FILE"
 log "  Full log: $LOG_FILE"
 log "================================================"
-exit 1
+exit 2
