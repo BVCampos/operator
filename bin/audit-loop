@@ -12,7 +12,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-loop"
 
 # Defaults
-MAX_ITERATIONS=10
+MAX_ITERATIONS=20
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -71,8 +71,8 @@ TOTAL_FILES=$(git ls-files --cached --others --exclude-standard 2>/dev/null | wc
 
 # Show existing progress if any
 if [ -f "$PROGRESS_FILE" ]; then
-  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
   PROGRESS_INFO="Resuming: $COVERED done, $REMAINING remaining"
 else
   PROGRESS_INFO="Fresh audit (no progress file)"
@@ -102,8 +102,8 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Show current progress
   if [ -f "$PROGRESS_FILE" ]; then
-    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
     log "Progress: $COVERED sections done, $REMAINING remaining"
   fi
 
@@ -141,8 +141,8 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     log "================================================"
 
     if [ -f "$REPORT_FILE" ]; then
-      CRITICAL=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null || echo "0")
-      IMPORTANT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null || echo "0")
+      CRITICAL=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null) || CRITICAL=0
+      IMPORTANT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null) || IMPORTANT=0
       log "Report: $REPORT_FILE"
       log "Progress: $PROGRESS_FILE"
     fi
@@ -152,8 +152,8 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Show progress summary after each iteration
   if [ -f "$PROGRESS_FILE" ]; then
     echo ""
-    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
     TOTAL_SECTIONS=$(( COVERED + REMAINING ))
     log "Progress: $COVERED/$TOTAL_SECTIONS sections audited"
   fi
@@ -178,8 +178,8 @@ log "================================================"
 log "  Reached max iterations ($MAX_ITERATIONS)."
 log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
 if [ -f "$PROGRESS_FILE" ]; then
-  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
   log "  Sections: $COVERED done, $REMAINING remaining"
 fi
 log "  Report: $REPORT_FILE"

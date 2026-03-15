@@ -1,6 +1,6 @@
 #!/bin/bash
-# audit-fix — Fix findings from audit-report.md section by section
-# Usage: audit-fix [--max N]
+# audit-fix — Fix audit findings in parallel using worktrees
+# Usage: audit-fix [--max N] [--model MODEL]
 
 set -e
 
@@ -12,33 +12,34 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-fix"
 
 # Defaults
-MAX_ITERATIONS=10
+MAX_SECTIONS=0  # 0 = all unfixed
+MODEL=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
     --max)
-      MAX_ITERATIONS="$2"
+      MAX_SECTIONS="$2"
+      shift 2
+      ;;
+    --model)
+      MODEL="$2"
       shift 2
       ;;
     -h|--help)
-      echo "Usage: audit-fix [--max N]"
+      echo "Usage: audit-fix [--max N] [--model MODEL]"
       echo ""
-      echo "Fixes findings from audit-report.md section by section."
-      echo "Run audit-loop first to generate the report."
+      echo "Fixes audit findings in parallel — one worktree per section."
+      echo "Cherry-picks commits back, then runs tests once on the combined result."
       echo ""
       echo "Options:"
-      echo "  --max N    Max iterations (default: 10)"
-      echo ""
-      echo "Files:"
-      echo "  audit-report.md          Input — findings from audit-loop (required)"
-      echo "  audit-fix-progress.md    Tracks which sections have been fixed"
-      echo "  audit-fix-changelog.md   Cumulative log of what was fixed"
+      echo "  --max N        Max sections to fix in parallel (default: all)"
+      echo "  --model MODEL  Claude model to use (e.g., sonnet)"
       exit 0
       ;;
     *)
       if [[ "$1" =~ ^[0-9]+$ ]]; then
-        MAX_ITERATIONS="$1"
+        MAX_SECTIONS="$1"
       else
         echo "Unknown option: $1"
         exit 1
@@ -61,141 +62,371 @@ fi
 
 PROJECT_DIR="$(git rev-parse --show-toplevel)"
 cd "$PROJECT_DIR"
+BASE_BRANCH=$(git branch --show-current)
+BASE_COMMIT=$(git rev-parse HEAD)
 
-# Prefer verified report if it exists
+# Prefer verified report
 if [ -f "$PROJECT_DIR/audit-report-verified.md" ]; then
   REPORT_FILE="$PROJECT_DIR/audit-report-verified.md"
   log "Using verified report: audit-report-verified.md"
 elif [ -f "$PROJECT_DIR/audit-report.md" ]; then
   REPORT_FILE="$PROJECT_DIR/audit-report.md"
-  log "Using unverified report: audit-report.md (run audit-verify first for better results)"
+  log "Using unverified report: audit-report.md"
 else
-  echo "Error: No audit report found."
-  echo "Run 'audit-loop' first to generate the audit report."
+  echo "Error: No audit report found. Run 'operator audit' first."
   exit 1
 fi
+
 PROGRESS_FILE="$PROJECT_DIR/audit-fix-progress.md"
 CHANGELOG_FILE="$PROJECT_DIR/audit-fix-changelog.md"
 
-# Count findings in report
-REPORT_SECTIONS=$(grep -c "^## " "$REPORT_FILE" 2>/dev/null || echo "0")
-CRITICAL_COUNT=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null || echo "0")
-IMPORTANT_COUNT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null || echo "0")
+# ── Extract sections from report ────────────────────────────────────
 
-# Show existing fix progress if any
+ALL_SECTIONS=()
+while IFS= read -r line; do
+  ALL_SECTIONS+=("$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')")
+done < <(grep "^## " "$REPORT_FILE")
+
+ALL_COUNT=${#ALL_SECTIONS[@]}
+
+if [ "$ALL_COUNT" -eq 0 ]; then
+  echo "Error: No sections found in audit report."
+  exit 1
+fi
+
+# ── Filter to unfixed sections ──────────────────────────────────────
+
+SECTIONS=()
 if [ -f "$PROGRESS_FILE" ]; then
-  FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
-  PROGRESS_INFO="Resuming: $FIXED fixed, $REMAINING remaining"
+  for section in "${ALL_SECTIONS[@]}"; do
+    if ! grep -F "[x]" "$PROGRESS_FILE" 2>/dev/null | grep -qF "$section"; then
+      SECTIONS+=("$section")
+    fi
+  done
 else
-  PROGRESS_INFO="Fresh run (all sections unfixed)"
+  SECTIONS=("${ALL_SECTIONS[@]}")
+fi
+
+SECTION_COUNT=${#SECTIONS[@]}
+
+if [ "$SECTION_COUNT" -eq 0 ]; then
+  log "All sections already fixed!"
+  exit 0
+fi
+
+# Apply max limit
+if [ "$MAX_SECTIONS" -gt 0 ] && [ "$MAX_SECTIONS" -lt "$SECTION_COUNT" ]; then
+  SECTIONS=("${SECTIONS[@]:0:$MAX_SECTIONS}")
+  SECTION_COUNT=${#SECTIONS[@]}
 fi
 
 echo "================================================"
-echo "  Audit Fix — Max iterations: $MAX_ITERATIONS"
-echo "  Project:    $PROJECT_DIR"
-echo "  Branch:     $(git branch --show-current)"
-echo "  Report:     $REPORT_FILE ($REPORT_SECTIONS sections)"
-echo "  Progress:   $PROGRESS_INFO"
-echo "  Log:        $LOG_FILE"
+echo "  Audit Fix — $SECTION_COUNT sections in parallel"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+echo "  Project:  $PROJECT_DIR"
+echo "  Branch:   $BASE_BRANCH"
+echo "  Report:   $(basename "$REPORT_FILE")"
+echo "  Log:      $LOG_FILE"
 echo "================================================"
 echo ""
-log "Started audit-fix --max $MAX_ITERATIONS"
-log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
-log "Report: $REPORT_SECTIONS sections | $PROGRESS_INFO"
+log "Started audit-fix — $SECTION_COUNT sections in parallel"
+log "Base commit: $BASE_COMMIT"
+
+# ── Set up worktrees and launch fixers ──────────────────────────────
+
+FIX_TEMPLATE=$(cat "$FIX_PROMPT")
+WORK_DIR=$(mktemp -d)
+WORKTREE_BASE="$PROJECT_DIR/.audit-fix-worktrees"
+mkdir -p "$WORKTREE_BASE"
+
+SANITIZED_NAMES=()
+
+cleanup() {
+  cd "$PROJECT_DIR" 2>/dev/null || true
+  for name in "${SANITIZED_NAMES[@]}"; do
+    git worktree remove "$WORKTREE_BASE/$name" --force 2>/dev/null || rm -rf "$WORKTREE_BASE/$name"
+    git branch -D "audit-fix/$name" 2>/dev/null || true
+  done
+  rmdir "$WORKTREE_BASE" 2>/dev/null || true
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
+
+CLAUDE_CMD="claude --dangerously-skip-permissions --print"
+[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
 
 START_TIME=$(date +%s)
+PIDS=()
 
-for i in $(seq 1 $MAX_ITERATIONS); do
-  echo ""
-  echo "==============================================================="
-  echo "  Fix iteration $i of $MAX_ITERATIONS"
-  echo "==============================================================="
-  echo ""
+for i in "${!SECTIONS[@]}"; do
+  section="${SECTIONS[$i]}"
+  idx=$((i + 1))
 
-  # Show current progress
-  if [ -f "$PROGRESS_FILE" ]; then
-    FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "?")
-    log "Progress: $FIXED sections fixed, $REMAINING remaining"
-  fi
+  # Sanitize name for branch/dir
+  name=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+  SANITIZED_NAMES+=("$name")
 
-  # Run fix
-  FIX_OUT=$(mktemp)
-  command claude --dangerously-skip-permissions --print < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
-  CLAUDE_PID=$!
-  log "Claude fix started (PID: $CLAUDE_PID)"
+  branch="audit-fix/$name"
+  wt="$WORKTREE_BASE/$name"
 
-  spin $CLAUDE_PID "Fixing audit findings"
+  # Clean up if exists from previous run
+  [ -d "$wt" ] && { git worktree remove "$wt" --force 2>/dev/null || rm -rf "$wt"; }
+  git branch -D "$branch" 2>/dev/null || true
 
-  wait $CLAUDE_PID || true
-  OUTPUT=$(cat "$FIX_OUT")
-  rm -f "$FIX_OUT"
+  # Create worktree from current HEAD
+  git worktree add -b "$branch" "$wt" "$BASE_COMMIT" --quiet
 
-  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
-  log "Fix output: $LINES lines"
+  # Symlink node_modules for tsc (avoids duplicate installs)
+  [ -d "$PROJECT_DIR/node_modules" ] && [ ! -e "$wt/node_modules" ] && \
+    ln -s "$PROJECT_DIR/node_modules" "$wt/node_modules"
 
-  # Show the output
-  echo ""
-  echo "$OUTPUT"
-  echo "$OUTPUT" >> "$LOG_FILE"
+  # Copy audit report into worktree (may not be in git)
+  cp "$REPORT_FILE" "$wt/$(basename "$REPORT_FILE")" 2>/dev/null || true
 
-  # Show git status after fixes
-  echo ""
-  COMMITTED=$(git log --oneline -1 2>/dev/null)
-  log "Latest commit: $COMMITTED"
+  # Extract this section's findings from the report
+  SECTION_CONTENT=$(awk -v header="## $section" '
+    $0 == header || index($0, header " — ") == 1 { found=1; print; next }
+    found && /^## / { exit }
+    found { print }
+  ' "$REPORT_FILE")
 
-  # Check for completion
-  if echo "$OUTPUT" | grep -q "<audit-fix>COMPLETE</audit-fix>"; then
-    END_TIME=$(date +%s)
-    ELAPSED=$(( END_TIME - START_TIME ))
-    ELAPSED_MIN=$(( ELAPSED / 60 ))
-    ELAPSED_SEC=$(( ELAPSED % 60 ))
+  # Build per-section prompt
+  cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
+$FIX_TEMPLATE
 
-    echo ""
-    log "================================================"
-    log "  All audit findings FIXED!"
-    log "  Completed in $i iterations (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
-    log "================================================"
-    log "  Changelog: $CHANGELOG_FILE"
-    log "  Progress:  $PROGRESS_FILE"
-    exit 0
-  fi
+---
 
-  # Show progress summary
-  if [ -f "$PROGRESS_FILE" ]; then
-    echo ""
-    FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-    TOTAL_SECTIONS=$(( FIXED + REMAINING ))
-    log "Progress: $FIXED/$TOTAL_SECTIONS sections fixed"
-  fi
+## Section to fix (${idx} of ${SECTION_COUNT})
 
-  if [ -f "$CHANGELOG_FILE" ]; then
-    CHANGELOG_LINES=$(wc -l < "$CHANGELOG_FILE" | tr -d ' ')
-    log "Changelog: $CHANGELOG_LINES lines"
-  fi
+**Section name:** $section
 
-  echo ""
-  log "Iteration $i complete."
-  sleep 2
+### Findings to fix
+
+$SECTION_CONTENT
+PROMPT_EOF
+
+  # Launch Claude in the worktree
+  (cd "$wt" && command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1) &
+  PIDS+=($!)
+
+  log "  Launched fixer $idx/$SECTION_COUNT: $section (PID: ${PIDS[-1]})"
 done
+
+echo ""
+
+# ── Wait with combined spinner ──────────────────────────────────────
+
+spin_all() {
+  if [ ! -t 1 ]; then
+    echo "  Fixing findings — $# sections..."
+    for pid in "$@"; do wait "$pid" 2>/dev/null || true; done
+    echo "  ✓ All sections fixed"
+    return
+  fi
+
+  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0 start=$SECONDS total=$#
+
+  while true; do
+    local running=0
+    for pid in "$@"; do
+      kill -0 "$pid" 2>/dev/null && running=$((running + 1))
+    done
+    [ $running -eq 0 ] && break
+
+    local elapsed=$(( SECONDS - start ))
+    printf "\033[2K\r  %s Fixing findings — %d/%d sections complete (%dm%02ds)" \
+      "${chars:i++%${#chars}:1}" "$(( total - running ))" "$total" \
+      "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    sleep 0.1
+  done
+
+  local t=$(( SECONDS - start ))
+  printf "\033[2K\r  ✓ All %d sections fixed (%dm%02ds)\n" "$total" "$(( t / 60 ))" "$(( t % 60 ))"
+}
+
+spin_all "${PIDS[@]}"
+
+FAILURES=0
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || FAILURES=$((FAILURES + 1))
+done
+
+echo ""
+[ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had errors"
+
+# ── Cherry-pick commits back to main branch ─────────────────────────
+
+log "Merging fixes to $BASE_BRANCH..."
+
+MERGED_SECTIONS=()
+CONFLICT_SECTIONS=()
+
+for i in "${!SECTIONS[@]}"; do
+  section="${SECTIONS[$i]}"
+  name="${SANITIZED_NAMES[$i]}"
+  branch="audit-fix/$name"
+
+  COMMIT_COUNT=$(git log --oneline "$BASE_COMMIT..$branch" 2>/dev/null | wc -l | tr -d ' ')
+
+  if [ "$COMMIT_COUNT" -eq 0 ]; then
+    log "  ✗ $section: no commits"
+    continue
+  fi
+
+  COMMITS=$(git log --reverse --format="%H" "$BASE_COMMIT..$branch" 2>/dev/null)
+
+  ok=true
+  for commit in $COMMITS; do
+    if ! git cherry-pick "$commit" --no-edit 2>/dev/null; then
+      git cherry-pick --abort 2>/dev/null || true
+      CONFLICT_SECTIONS+=("$section")
+      ok=false
+      break
+    fi
+  done
+
+  if [ "$ok" = true ]; then
+    MERGED_SECTIONS+=("$section")
+    log "  ✓ $section ($COMMIT_COUNT commits)"
+  else
+    log "  ✗ $section (conflict, skipped)"
+  fi
+done
+
+MERGED=${#MERGED_SECTIONS[@]}
+
+echo ""
+log "Merged: $MERGED/$SECTION_COUNT sections"
+[ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "Conflicts: ${CONFLICT_SECTIONS[*]}"
+
+# ── Show fix summaries ──────────────────────────────────────────────
+
+for i in "${!SECTIONS[@]}"; do
+  idx=$((i + 1))
+  section="${SECTIONS[$i]}"
+  if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+    echo ""
+    log "--- $section ---"
+    cat "$WORK_DIR/output-$idx.md"
+    cat "$WORK_DIR/output-$idx.md" >> "$LOG_FILE"
+  fi
+done
+
+# ── Run tests once on the combined result ───────────────────────────
+
+TSC_OK=true
+TESTS_OK=true
+
+if [ "$MERGED" -gt 0 ] && [ -f "$PROJECT_DIR/package.json" ]; then
+  echo ""
+  log "Running verification on combined result..."
+
+  # Type check
+  TSC_OUT=$(mktemp)
+  (cd "$PROJECT_DIR" && npx tsc --noEmit 2>&1) > "$TSC_OUT" &
+  TSC_PID=$!
+  spin $TSC_PID "Type checking"
+  wait $TSC_PID && TSC_OK=true || TSC_OK=false
+
+  if [ "$TSC_OK" = true ]; then
+    log "  tsc: clean"
+  else
+    TSC_ERRORS=$(grep -c "error TS" "$TSC_OUT" 2>/dev/null) || TSC_ERRORS=0
+    log "  tsc: $TSC_ERRORS errors"
+    tail -20 "$TSC_OUT"
+  fi
+  rm -f "$TSC_OUT"
+
+  # Test suite
+  TEST_OUT=$(mktemp)
+  (cd "$PROJECT_DIR" && npm test 2>&1) > "$TEST_OUT" &
+  TEST_PID=$!
+  spin $TEST_PID "Running tests"
+  wait $TEST_PID && TESTS_OK=true || TESTS_OK=false
+
+  if [ "$TESTS_OK" = true ]; then
+    log "  tests: passing"
+  else
+    log "  tests: failures detected"
+    tail -30 "$TEST_OUT"
+  fi
+  rm -f "$TEST_OUT"
+fi
+
+# ── Update progress and changelog ───────────────────────────────────
+
+# Create progress file if needed
+if [ ! -f "$PROGRESS_FILE" ]; then
+  {
+    echo "# Audit Fix Progress"
+    echo ""
+    echo "## Sections"
+    for section in "${ALL_SECTIONS[@]}"; do
+      echo "- [ ] $section"
+    done
+  } > "$PROGRESS_FILE"
+fi
+
+# Mark merged sections as fixed
+for section in "${MERGED_SECTIONS[@]}"; do
+  TEMP_PF=$(mktemp)
+  while IFS= read -r line; do
+    if echo "$line" | grep -qF "[ ] $section"; then
+      echo "- [x] $section — Fixed $(date '+%Y-%m-%d')"
+    else
+      echo "$line"
+    fi
+  done < "$PROGRESS_FILE" > "$TEMP_PF"
+  mv "$TEMP_PF" "$PROGRESS_FILE"
+done
+
+# Append to changelog
+if [ ! -f "$CHANGELOG_FILE" ]; then
+  echo "# Audit Fix Changelog" > "$CHANGELOG_FILE"
+  echo "" >> "$CHANGELOG_FILE"
+fi
+
+{
+  echo "## Parallel Fix — $(date '+%Y-%m-%d %H:%M')"
+  echo ""
+  echo "Sections fixed: $MERGED/$SECTION_COUNT"
+  [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && echo "Conflicts (skipped): ${CONFLICT_SECTIONS[*]}"
+  echo ""
+
+  for i in "${!SECTIONS[@]}"; do
+    idx=$((i + 1))
+    section="${SECTIONS[$i]}"
+    if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+      echo "### $section"
+      echo ""
+      cat "$WORK_DIR/output-$idx.md"
+      echo ""
+    fi
+  done
+
+  echo "### Verification"
+  echo "- tsc: $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"
+  echo "- tests: $([ "$TESTS_OK" = true ] && echo "passing" || echo "failures")"
+  echo ""
+  echo "---"
+  echo ""
+} >> "$CHANGELOG_FILE"
+
+# Commit progress + changelog
+git add "$PROGRESS_FILE" "$CHANGELOG_FILE" 2>/dev/null || true
+git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))
-ELAPSED_MIN=$(( ELAPSED / 60 ))
-ELAPSED_SEC=$(( ELAPSED % 60 ))
 
 echo ""
 log "================================================"
-log "  Reached max iterations ($MAX_ITERATIONS)."
-log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
-if [ -f "$PROGRESS_FILE" ]; then
-  FIXED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null || echo "0")
-  log "  Sections: $FIXED fixed, $REMAINING remaining"
-fi
-log "  Changelog: $CHANGELOG_FILE"
-log "  Full log:  $LOG_FILE"
+log "  Audit Fix complete! ($((ELAPSED / 60))m$((ELAPSED % 60))s)"
+log "  Sections fixed: $MERGED/$SECTION_COUNT"
+[ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "  Conflicts:      ${CONFLICT_SECTIONS[*]}"
+[ "$MERGED" -gt 0 ] && log "  tsc:            $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"
+[ "$MERGED" -gt 0 ] && log "  tests:          $([ "$TESTS_OK" = true ] && echo "passing" || echo "failures")"
+log "  Progress:       $PROGRESS_FILE"
+log "  Changelog:      $CHANGELOG_FILE"
 log "================================================"
-exit 2

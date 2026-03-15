@@ -7,8 +7,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Defaults
-AUDIT_MAX=10
-FIX_MAX=10
+AUDIT_MAX=20
+FIX_MAX=20
 SKIP_VERIFY=false
 
 # Parse arguments
@@ -31,12 +31,16 @@ while [[ $# -gt 0 ]]; do
       FIX_MAX="$2"
       shift 2
       ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
     --skip-verify)
       SKIP_VERIFY=true
       shift
       ;;
     -h|--help)
-      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--skip-verify]"
+      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--skip-verify]"
       echo ""
       echo "Runs audit-loop → audit-verify → audit-fix in sequence."
       echo ""
@@ -44,6 +48,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Set audit and fix max values (default: 10)"
       echo "  --audit-max N    Max audit iterations (default: 10)"
       echo "  --fix-max N      Max fix iterations (default: 10)"
+      echo "  --model MODEL    Claude model for audit-fix (e.g., sonnet)"
       echo "  --skip-verify    Skip the verification step"
       exit 0
       ;;
@@ -68,7 +73,8 @@ if [ "$SKIP_VERIFY" = false ]; then
 else
   echo "  Verify: skipped"
 fi
-echo "  Fix:    up to $FIX_MAX iterations"
+echo "  Fix:    up to $FIX_MAX sections in parallel"
+[ -n "$MODEL" ] && echo "  Model:  $MODEL"
 echo "================================================"
 echo ""
 
@@ -108,7 +114,9 @@ fi
 # Phase 3: Fix
 echo "[$(date '+%H:%M:%S')] Phase 3: FIX"
 echo ""
-"$SCRIPT_DIR/audit-fix" --max "$FIX_MAX" && FIX_EXIT=0 || FIX_EXIT=$?
+FIX_CMD="$SCRIPT_DIR/audit-fix --max $FIX_MAX"
+[ -n "$MODEL" ] && FIX_CMD="$FIX_CMD --model $MODEL"
+$FIX_CMD && FIX_EXIT=0 || FIX_EXIT=$?
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

@@ -20,6 +20,15 @@ setup_log() {
 spin() {
   local pid=$1
   local label=$2
+
+  # Non-TTY fallback (log files, pipes)
+  if [ ! -t 1 ]; then
+    echo "  $label..."
+    wait "$pid" 2>/dev/null || true
+    echo "  ✓ $label completed"
+    return
+  fi
+
   local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
   local start=$SECONDS
@@ -27,11 +36,11 @@ spin() {
     local elapsed=$(( SECONDS - start ))
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
-    printf "\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
+    printf "\033[2K\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$mins" "$secs"
     sleep 0.1
   done
   local total=$(( SECONDS - start ))
   local mins=$(( total / 60 ))
   local secs=$(( total % 60 ))
-  printf "\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
+  printf "\033[2K\r  ✓ %s completed (%dm%02ds)\n" "$label" "$mins" "$secs"
 }

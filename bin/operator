@@ -19,6 +19,7 @@ Commands:
   audit verify                        Verify audit findings before fixing
   audit fix                           Fix confirmed audit findings
   audit full                          Audit → verify → fix pipeline
+  audit reset                         Clear state files for a fresh audit
   ralph start --prd <file.md>         Start Ralph loop from PRD
   ralph status                        List Ralph sessions
   ralph logs <name>                   Attach to Ralph session
@@ -69,6 +70,9 @@ case "$COMMAND" in
         ;;
       full)
         exec "$SCRIPT_DIR/audit-loop-fix" "$@"
+        ;;
+      reset)
+        exec "$SCRIPT_DIR/audit-reset" "$@"
         ;;
       --*)
         # Flag passed directly to audit-loop (e.g., operator audit --max 5)

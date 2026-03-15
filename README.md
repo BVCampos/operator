@@ -83,14 +83,17 @@ Files: `audit-report-verified.md`
 
 ### `operator audit fix` — fix confirmed findings
 
-Reads the audit report and fixes issues section by section. Uses the verified report if available (skipping false positives).
+Fixes all sections in parallel using git worktrees — one isolated worktree per section. Each section's fixes are cherry-picked back to the main branch, then tests run once on the combined result.
 
 ```bash
-operator audit fix            # fix all sections
-operator audit fix --max 5
+operator audit fix                  # fix all unfixed sections in parallel
+operator audit fix --max 5          # limit to 5 sections at a time
+operator audit fix --model sonnet   # use a faster model
 ```
 
-Files: `audit-fix-progress.md`, `audit-fix-changelog.md`
+Uses the verified report if available (skipping false positives).
+
+Files: `audit-fix-progress.md`, `audit-fix-changelog.md`, `.audit-fix-worktrees/` (temporary)
 
 ### `operator audit full` — complete pipeline
 
@@ -100,6 +103,7 @@ Runs audit → verify → fix in sequence:
 operator audit full                       # audit and fix: 10 iterations each
 operator audit full --max 5               # audit and fix: 5 iterations each
 operator audit full --audit-max 5 --fix-max 10
+operator audit full --model sonnet        # use faster model for fix phase
 operator audit full --skip-verify         # skip verification
 ```
 
@@ -166,7 +170,7 @@ Tools create files in your **project root** to track progress:
 | `review` | `review-report.md`, `review-changelog.md` |
 | `audit` | `audit-report.md`, `audit-progress.md` |
 | `audit verify` | `audit-report-verified.md` |
-| `audit fix` | `audit-fix-progress.md`, `audit-fix-changelog.md` |
+| `audit fix` | `audit-fix-progress.md`, `audit-fix-changelog.md`, `.audit-fix-worktrees/` |
 | `ralph` | `.ralph-worktrees/`, `scripts/ralph/prd.json` |
 
 Add to your `.gitignore`:
@@ -178,6 +182,7 @@ audit-progress.md
 audit-report-verified.md
 audit-fix-progress.md
 audit-fix-changelog.md
+.audit-fix-worktrees/
 .ralph-worktrees/
 ```
 

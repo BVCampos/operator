@@ -138,7 +138,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
       if [ -f "$CHANGELOG" ]; then
         echo ""
         log "Changelog: $CHANGELOG"
-        ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null || echo "0")
+        ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null) || ITER_COUNT=0
         log "Total entries: $ITER_COUNT"
       fi
       exit 0
@@ -221,7 +221,7 @@ log "  Reached max iterations ($MAX_ITERATIONS)."
 log "  Check review-report.md for remaining issues."
 log "  Full log: $LOG_FILE"
 if [ -f "$CHANGELOG" ]; then
-  ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null || echo "0")
+  ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null) || ITER_COUNT=0
   log "  Changelog: $CHANGELOG ($ITER_COUNT entries)"
 fi
 log "================================================"

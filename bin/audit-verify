@@ -144,6 +144,16 @@ echo ""
 
 # Combined spinner showing progress across all parallel instances
 spin_all() {
+  # Non-TTY fallback (log files, pipes)
+  if [ ! -t 1 ]; then
+    echo "  Verifying findings — $# sections..."
+    for pid in "$@"; do
+      wait "$pid" 2>/dev/null || true
+    done
+    echo "  ✓ All sections verified"
+    return
+  fi
+
   local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
   local i=0
   local start=$SECONDS
@@ -161,7 +171,7 @@ spin_all() {
     local mins=$(( elapsed / 60 ))
     local secs=$(( elapsed % 60 ))
     local done_count=$(( total - running ))
-    printf "\r  %s Verifying findings — %d/%d sections complete (%dm%02ds)" \
+    printf "\033[2K\r  %s Verifying findings — %d/%d sections complete (%dm%02ds)" \
       "${chars:i++%${#chars}:1}" "$done_count" "$total" "$mins" "$secs"
     sleep 0.1
   done
@@ -169,7 +179,7 @@ spin_all() {
   local total_time=$(( SECONDS - start ))
   local mins=$(( total_time / 60 ))
   local secs=$(( total_time % 60 ))
-  printf "\r  ✓ All %d sections verified (%dm%02ds)                           \n" "$total" "$mins" "$secs"
+  printf "\033[2K\r  ✓ All %d sections verified (%dm%02ds)\n" "$total" "$mins" "$secs"
 }
 
 spin_all "${PIDS[@]}"
@@ -201,8 +211,8 @@ log "Combining verification results..."
       echo "---"
       echo ""
 
-      CONFIRMED=$(grep -ci "CONFIRMED" "$WORK_DIR/output-$idx.md" 2>/dev/null || echo "0")
-      FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$WORK_DIR/output-$idx.md" 2>/dev/null || echo "0")
+      CONFIRMED=$(grep -ci "CONFIRMED" "$WORK_DIR/output-$idx.md" 2>/dev/null) || CONFIRMED=0
+      FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$WORK_DIR/output-$idx.md" 2>/dev/null) || FALSE_POS=0
       log "  $section: $CONFIRMED confirmed, $FALSE_POS false positives"
     else
       log "  $section: no output (verification may have failed)"
@@ -216,10 +226,10 @@ ELAPSED_MIN=$(( ELAPSED / 60 ))
 ELAPSED_SEC=$(( ELAPSED % 60 ))
 
 # Final stats
-TOTAL_CONFIRMED=$(grep -ci "CONFIRMED" "$VERIFIED_FILE" 2>/dev/null || echo "0")
-TOTAL_FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$VERIFIED_FILE" 2>/dev/null || echo "0")
-TOTAL_DUPES=$(grep -ci "DUPLICATE" "$VERIFIED_FILE" 2>/dev/null || echo "0")
-TOTAL_BY_DESIGN=$(grep -ci "BY_DESIGN" "$VERIFIED_FILE" 2>/dev/null || echo "0")
+TOTAL_CONFIRMED=$(grep -ci "CONFIRMED" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_CONFIRMED=0
+TOTAL_FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_FALSE_POS=0
+TOTAL_DUPES=$(grep -ci "DUPLICATE" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_DUPES=0
+TOTAL_BY_DESIGN=$(grep -ci "BY_DESIGN" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_BY_DESIGN=0
 
 echo ""
 log "================================================"

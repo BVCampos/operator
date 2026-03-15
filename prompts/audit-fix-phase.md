@@ -1,93 +1,36 @@
-# Audit Fix Phase
+# Audit Fix — Single Section
 
-You are an autonomous code fixer. Read the codebase audit report and fix findings section by section.
+You are fixing the findings from one section of a codebase audit. The section and its findings are provided below.
 
-## Steps
+## Instructions
 
-### 1. Read the audit report and fix progress
+### 1. Fix findings by priority
 
-Check if `./audit-report-verified.md` exists — if so, use it (it contains verdicts: CONFIRMED, FALSE_POSITIVE, DUPLICATE, BY_DESIGN). Only fix findings marked CONFIRMED or WRONG_SEVERITY. Skip FALSE_POSITIVE, DUPLICATE, and BY_DESIGN findings.
+Work through findings in order: **critical first**, then **important**, then **minor**.
 
-If no verified report exists, fall back to `./audit-report.md` and treat all findings as confirmed.
-
-Then read `./audit-fix-progress.md` if it exists. This tracks which sections' findings have been fixed.
-
-If `audit-fix-progress.md` does NOT exist, create it:
-1. Parse all section headings from `audit-report.md` (lines like `## [Section Name] — Audited ...`)
-2. List each section with its issue counts
-3. Mark all as `[ ] Not fixed`
-
-Format:
-```markdown
-# Audit Fix Progress
-
-## Stats
-- Sections: 0/N fixed
-- Issues fixed: 0 critical, 0 important, 0 minor
-- Last updated: YYYY-MM-DD HH:MM
-
-## Sections
-- [ ] auth & middleware — 0 critical, 2 important, 3 minor
-- [ ] DB schema & queries — 1 critical, 4 important, 1 minor
-...
-```
-
-If `audit-fix-progress.md` exists:
-1. Find the next section marked `[ ]`
-2. If all sections are marked `[x]`, output `<audit-fix>COMPLETE</audit-fix>` and stop
-
-### 2. Fix the chosen section
-
-Announce which section you're fixing and how many issues it has.
-
-Extract ALL findings for this section from `audit-report.md`. Work through them in priority order:
-
-#### A. Critical issues first
-
-For EACH critical issue:
+For EACH finding:
 1. Read the affected file(s) and understand the context
-2. Implement the minimal, targeted fix
-3. Do NOT refactor surrounding code
+2. Implement the minimal, targeted fix — do NOT refactor surrounding code
+3. If the fix conflicts with another fix you already made, skip it and note why
 
-#### B. Important issues
+If the findings have verdicts (from verification):
+- Only fix **CONFIRMED** and **WRONG_SEVERITY** findings
+- Skip FALSE_POSITIVE, DUPLICATE, and BY_DESIGN findings
 
-For EACH important issue:
-1. Read the affected file(s)
-2. Implement the fix
-3. If the fix conflicts with a critical fix you already made, skip it and note why
+### 2. Type check
 
-#### C. Minor issues
-
-For EACH minor issue:
-1. Read the affected file(s)
-2. Apply the fix only if it's safe and straightforward
-3. Skip if risky or if it touches code modified by a higher-priority fix
-
-### 3. Verify
-
-After fixing all issues for this section, run the project's quality checks. Look for scripts in `package.json`, `Makefile`, or project docs. Common patterns:
-
+After fixing ALL issues, run type checking to verify your changes compile:
 ```bash
-# TypeScript projects
-npx tsc --noEmit && npm test
-
-# Python projects
-python -m pytest
-
-# Go projects
-go vet ./... && go test ./...
+npx tsc --noEmit
 ```
-
-If tests fail:
-1. Analyze the failure
-2. Fix if caused by your changes
-3. If pre-existing, note it and move on
 
 If type checking fails, fix the type errors.
 
-### 4. Commit
+**Do NOT run the full test suite** — tests will be run once after all sections are merged.
 
-Stage all changes and commit:
+### 3. Commit
+
+Stage all changed source files and commit:
 ```
 fix(audit): [section name] — fix N issues
 
@@ -95,44 +38,15 @@ fix(audit): [section name] — fix N issues
 - N skipped (with reasons)
 ```
 
-### 5. Update progress and changelog
+Do NOT commit progress files, changelog files, or audit reports — only commit code changes.
 
-**Update `./audit-fix-progress.md`:**
-1. Mark the section as `[x] Fixed — YYYY-MM-DD — N/M issues resolved`
-2. Update the stats at the top
+### 4. Output
 
-**APPEND to `./audit-fix-changelog.md`** (create with `# Audit Fix Changelog` header if it doesn't exist):
+Output a brief summary:
+- Section name
+- Issues fixed (count by severity)
+- Issues skipped (count and reasons)
+- Files modified
+- tsc status
 
-```markdown
-## [Section Name] — Fixed YYYY-MM-DD HH:MM
-
-### Critical (N/N resolved)
-- **[file:line]** Description — FIXED: what was done
-- **[file:line]** Description — SKIPPED: why
-
-### Important (N/N resolved)
-- **[file:line]** Description — FIXED: what was done
-- **[file:line]** Description — SKIPPED: why
-
-### Minor (N/N resolved)
-- **[file:line]** Description — FIXED: what was done
-- **[file:line]** Description — SKIPPED: why
-
-### Status
-- tsc: clean / N errors
-- tests: N passed, N failed (note if pre-existing)
-- commit: `<hash>` `<message>`
-
----
-```
-
-### 6. Output
-
-Summary of this iteration:
-- Section fixed
-- Issues resolved vs skipped (with counts)
-- Sections remaining
-
-Then output one of:
-- `<audit-fix>COMPLETE</audit-fix>` if all sections are now fixed
-- `<audit-fix>CONTINUE</audit-fix>` if sections remain
+Output ONLY the summary. Do not write to progress or changelog files.
