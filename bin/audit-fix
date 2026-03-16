@@ -224,7 +224,7 @@ PROMPT_EOF
   (cd "$wt" && command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1) &
   PIDS+=($!)
 
-  log "  Launched fixer $idx/$SECTION_COUNT: $section (PID: ${PIDS[-1]})"
+  log "  Launched fixer $idx/$SECTION_COUNT: $section (PID: $!)"
 done
 
 echo ""
