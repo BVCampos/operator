@@ -1,6 +1,6 @@
 #!/bin/bash
 # audit-verify — Verify all audit findings in parallel (one agent per section)
-# Usage: audit-verify
+# Usage: audit-verify [--model MODEL] [--effort LEVEL]
 
 set -e
 
@@ -11,6 +11,10 @@ VERIFY_PROMPT="$PROMPTS_DIR/audit-verify-phase.md"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-verify"
 
+# Defaults
+MODEL=""
+EFFORT=""
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -18,11 +22,23 @@ while [[ $# -gt 0 ]]; do
       echo "Note: --max is ignored. audit-verify runs all sections in one parallel pass."
       shift 2
       ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    --effort)
+      EFFORT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: audit-verify"
+      echo "Usage: audit-verify [--model MODEL] [--effort LEVEL]"
       echo ""
       echo "Verifies all audit findings in parallel — one agent per section."
       echo "Run after 'operator audit', before 'operator audit fix'."
+      echo ""
+      echo "Options:"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
       echo ""
       echo "Files:"
       echo "  audit-report.md            Input (required)"
@@ -80,9 +96,16 @@ fi
 
 REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
 
+# Build claude command
+CLAUDE_CMD="claude --dangerously-skip-permissions --print"
+[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
+[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
+
 echo "================================================"
 echo "  Audit Verify — $SECTION_COUNT sections in parallel"
 echo "  Project:  $PROJECT_DIR"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
 echo "  Report:   $REPORT_FILE ($REPORT_LINES lines)"
 echo "  Log:      $LOG_FILE"
 echo "================================================"
@@ -134,7 +157,7 @@ $REPORT_CONTENT
 PROMPT_EOF
 
   # Launch claude in background
-  command claude --dangerously-skip-permissions --print < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1 &
+  command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1 &
   PIDS+=($!)
 
   log "  Launched verifier $idx/$SECTION_COUNT: $section (PID: ${PIDS[-1]})"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # audit-loop — Systematically audit the codebase section by section
-# Usage: audit-loop [--max N]
+# Usage: audit-loop [--max N] [--model MODEL] [--effort LEVEL]
 
 set -e
 
@@ -13,6 +13,8 @@ setup_log "audit-loop"
 
 # Defaults
 MAX_ITERATIONS=20
+MODEL=""
+EFFORT=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -21,14 +23,24 @@ while [[ $# -gt 0 ]]; do
       MAX_ITERATIONS="$2"
       shift 2
       ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    --effort)
+      EFFORT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: audit-loop [--max N]"
+      echo "Usage: audit-loop [--max N] [--model MODEL] [--effort LEVEL]"
       echo ""
       echo "Systematically audits the codebase section by section."
       echo "Each iteration picks an uncovered section and spawns specialist agents."
       echo ""
       echo "Options:"
-      echo "  --max N    Max iterations (default: 10)"
+      echo "  --max N          Max iterations (default: 20)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
       echo ""
       echo "Files created in project root:"
       echo "  audit-progress.md   Tracks which sections have been audited"
@@ -78,10 +90,17 @@ else
   PROGRESS_INFO="Fresh audit (no progress file)"
 fi
 
+# Build claude command
+CLAUDE_CMD="claude --dangerously-skip-permissions --print"
+[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
+[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
+
 echo "================================================"
 echo "  Audit Loop — Max iterations: $MAX_ITERATIONS"
 echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $(git branch --show-current)"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
 echo "  Files:    $TOTAL_FILES tracked files"
 echo "  Progress: $PROGRESS_INFO"
 echo "  Log:      $LOG_FILE"
@@ -109,7 +128,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Run audit
   AUDIT_OUT=$(mktemp)
-  command claude --dangerously-skip-permissions --print < "$AUDIT_PROMPT" > "$AUDIT_OUT" 2>&1 &
+  command $CLAUDE_CMD < "$AUDIT_PROMPT" > "$AUDIT_OUT" 2>&1 &
   CLAUDE_PID=$!
   log "Claude audit started (PID: $CLAUDE_PID)"
 

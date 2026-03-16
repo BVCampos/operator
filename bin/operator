@@ -26,14 +26,17 @@ Commands:
   ralph stop <name>                   Stop a Ralph session
   ralph clean <name>                  Clean up after merge
 
-Options:
+Global options (supported by all commands):
+  --model MODEL                       Claude model (e.g., sonnet, opus, haiku)
+  --effort LEVEL                      Thinking effort: low, medium, high, max
   --help, -h                          Show this help
   --version, -v                       Show version
 
 Examples:
   operator review --max 5             Review and fix PR, up to 5 iterations
-  operator audit --max 10             Audit 10 sections of the codebase
-  operator audit full --max 5         Audit, verify, and fix (5 each)
+  operator review --model sonnet      Review using a specific model
+  operator audit --effort high        Audit with high thinking effort
+  operator audit full --model sonnet --effort low   Fast audit pipeline
   operator ralph start --prd tasks/feature.md --tool claude --max 20
 
 Documentation: https://github.com/BVCampos/operator

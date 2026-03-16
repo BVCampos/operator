@@ -1,6 +1,6 @@
 #!/bin/bash
 # review-loop — Review PR, fix issues, repeat until clean
-# Usage: review-loop [--max N] [--review-only] [--fix-only]
+# Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--review-only] [--fix-only]
 
 set -e
 
@@ -14,6 +14,8 @@ setup_log "review-loop"
 
 # Defaults
 MAX_ITERATIONS=3
+MODEL=""
+EFFORT=""
 
 # Parse arguments
 REVIEW_ONLY=false
@@ -25,6 +27,14 @@ while [[ $# -gt 0 ]]; do
       MAX_ITERATIONS="$2"
       shift 2
       ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    --effort)
+      EFFORT="$2"
+      shift 2
+      ;;
     --review-only)
       REVIEW_ONLY=true
       shift
@@ -34,12 +44,14 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      echo "Usage: review-loop [--max N] [--review-only] [--fix-only]"
+      echo "Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--review-only] [--fix-only]"
       echo ""
       echo "Runs a review → fix loop on the current branch's changes."
       echo ""
       echo "Options:"
       echo "  --max N          Max iterations (default: 3)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max (default: Claude's default)"
       echo "  --review-only    Only run the review phase (no fixes)"
       echo "  --fix-only       Only run the fix phase (assumes review-report.md exists)"
       echo ""
@@ -78,10 +90,17 @@ CHANGED_FILES=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
 STAGED_FILES=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
 BRANCH_DIFF=$(git diff main...HEAD --name-only 2>/dev/null | wc -l | tr -d ' ')
 
+# Build claude command
+CLAUDE_CMD="claude --dangerously-skip-permissions --print"
+[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
+[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
+
 echo "================================================"
 echo "  Review Loop — Max iterations: $MAX_ITERATIONS"
 echo "  Project: $PROJECT_DIR"
 echo "  Branch:  $(git branch --show-current)"
+[ -n "$MODEL" ] && echo "  Model:   $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
 echo "  Log:     $LOG_FILE"
 echo "  Changed: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
 echo "================================================"
@@ -107,7 +126,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
     # Run claude in background, capture output to temp file
     REVIEW_OUT=$(mktemp)
-    command claude --dangerously-skip-permissions --print < "$REVIEW_PROMPT" > "$REVIEW_OUT" 2>&1 &
+    command $CLAUDE_CMD < "$REVIEW_PROMPT" > "$REVIEW_OUT" 2>&1 &
     CLAUDE_PID=$!
     log "Claude review started (PID: $CLAUDE_PID)"
 
@@ -178,7 +197,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Run claude in background
   FIX_OUT=$(mktemp)
-  command claude --dangerously-skip-permissions --print < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
+  command $CLAUDE_CMD < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
   CLAUDE_PID=$!
   log "Claude fix started (PID: $CLAUDE_PID)"
 

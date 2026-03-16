@@ -1,6 +1,6 @@
 #!/bin/bash
 # ralph-start — Convert a PRD markdown, set up a worktree, and run Ralph autonomously
-# Usage: ralph-start --prd <file.md> [--tool claude|amp] [--max N] [--name NAME]
+# Usage: ralph-start --prd <file.md> [--tool claude|amp] [--max N] [--name NAME] [--model MODEL] [--effort LEVEL]
 #        ralph-start [--tool claude|amp] [--max N]  (if prd.json already exists in scripts/ralph/)
 
 set -e
@@ -26,6 +26,8 @@ PRD_FILE=""
 TOOL="claude"
 MAX_ITERATIONS=10
 NAME=""
+MODEL=""
+EFFORT=""
 PROJECT_DIR="$PWD"
 
 # Parse arguments
@@ -47,14 +49,24 @@ while [[ $# -gt 0 ]]; do
       NAME="$2"
       shift 2
       ;;
+    --model)
+      MODEL="$2"
+      shift 2
+      ;;
+    --effort)
+      EFFORT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: ralph-start --prd <file.md> [--tool claude|amp] [--max N] [--name NAME]"
+      echo "Usage: ralph-start --prd <file.md> [--tool claude|amp] [--max N] [--name NAME] [--model MODEL] [--effort LEVEL]"
       echo ""
       echo "Options:"
-      echo "  --prd FILE    Markdown PRD to convert to prd.json (required for first run)"
-      echo "  --tool TOOL   AI tool to use: claude (default) or amp"
-      echo "  --max N       Max iterations (default: 10)"
-      echo "  --name NAME   Session name (default: derived from PRD filename)"
+      echo "  --prd FILE       Markdown PRD to convert to prd.json (required for first run)"
+      echo "  --tool TOOL      AI tool to use: claude (default) or amp"
+      echo "  --max N          Max iterations (default: 10)"
+      echo "  --name NAME      Session name (default: derived from PRD filename)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
       exit 0
       ;;
     *)
@@ -123,6 +135,8 @@ log "  Name:     $NAME"
 log "  Branch:   $BRANCH_NAME"
 log "  Tool:     $TOOL"
 log "  Max iter: $MAX_ITERATIONS"
+[ -n "$MODEL" ] && log "  Model:    $MODEL"
+[ -n "$EFFORT" ] && log "  Effort:   $EFFORT"
 [ -n "$PRD_FILE" ] && log "  PRD:      $PRD_FILE"
 echo "================================================"
 echo ""
@@ -217,8 +231,11 @@ PROMPT_EOF
 $PRD_CONTENT"
 
   # Run claude to convert (with spinner)
+  CONVERT_CMD="claude --print"
+  [ -n "$MODEL" ] && CONVERT_CMD="$CONVERT_CMD --model $MODEL"
+  [ -n "$EFFORT" ] && CONVERT_CMD="$CONVERT_CMD --effort $EFFORT"
   CONVERT_OUT=$(mktemp)
-  echo "$FULL_PROMPT" | command claude --print > "$CONVERT_OUT" 2>&1 &
+  echo "$FULL_PROMPT" | command $CONVERT_CMD > "$CONVERT_OUT" 2>&1 &
   CLAUDE_PID=$!
   log "Claude conversion started (PID: $CLAUDE_PID)"
   spin $CLAUDE_PID "Converting PRD to JSON"

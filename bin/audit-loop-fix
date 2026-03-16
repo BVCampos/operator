@@ -1,6 +1,6 @@
 #!/bin/bash
 # audit-loop-fix — Run audit-loop, audit-verify, then audit-fix in sequence
-# Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--skip-verify]
+# Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--skip-verify]
 
 set -e
 
@@ -35,20 +35,25 @@ while [[ $# -gt 0 ]]; do
       MODEL="$2"
       shift 2
       ;;
+    --effort)
+      EFFORT="$2"
+      shift 2
+      ;;
     --skip-verify)
       SKIP_VERIFY=true
       shift
       ;;
     -h|--help)
-      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--skip-verify]"
+      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--skip-verify]"
       echo ""
       echo "Runs audit-loop → audit-verify → audit-fix in sequence."
       echo ""
       echo "Options:"
-      echo "  --max N          Set audit and fix max values (default: 10)"
-      echo "  --audit-max N    Max audit iterations (default: 10)"
-      echo "  --fix-max N      Max fix iterations (default: 10)"
-      echo "  --model MODEL    Claude model for audit-fix (e.g., sonnet)"
+      echo "  --max N          Set audit and fix max values (default: 20)"
+      echo "  --audit-max N    Max audit iterations (default: 20)"
+      echo "  --fix-max N      Max fix iterations (default: 20)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
       echo "  --skip-verify    Skip the verification step"
       exit 0
       ;;
@@ -75,6 +80,7 @@ else
 fi
 echo "  Fix:    up to $FIX_MAX sections in parallel"
 [ -n "$MODEL" ] && echo "  Model:  $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort: $EFFORT"
 echo "================================================"
 echo ""
 
@@ -83,7 +89,10 @@ START_TIME=$(date +%s)
 # Phase 1: Audit
 echo "[$(date '+%H:%M:%S')] Phase 1: AUDIT"
 echo ""
-"$SCRIPT_DIR/audit-loop" --max "$AUDIT_MAX" && AUDIT_EXIT=0 || AUDIT_EXIT=$?
+AUDIT_CMD="$SCRIPT_DIR/audit-loop --max $AUDIT_MAX"
+[ -n "$MODEL" ] && AUDIT_CMD="$AUDIT_CMD --model $MODEL"
+[ -n "$EFFORT" ] && AUDIT_CMD="$AUDIT_CMD --effort $EFFORT"
+$AUDIT_CMD && AUDIT_EXIT=0 || AUDIT_EXIT=$?
 
 echo ""
 echo "[$(date '+%H:%M:%S')] Audit phase finished (exit: $AUDIT_EXIT)"
@@ -104,7 +113,10 @@ fi
 if [ "$SKIP_VERIFY" = false ]; then
   echo "[$(date '+%H:%M:%S')] Phase 2: VERIFY"
   echo ""
-  "$SCRIPT_DIR/audit-verify" && VERIFY_EXIT=0 || VERIFY_EXIT=$?
+  VERIFY_CMD="$SCRIPT_DIR/audit-verify"
+  [ -n "$MODEL" ] && VERIFY_CMD="$VERIFY_CMD --model $MODEL"
+  [ -n "$EFFORT" ] && VERIFY_CMD="$VERIFY_CMD --effort $EFFORT"
+  $VERIFY_CMD && VERIFY_EXIT=0 || VERIFY_EXIT=$?
 
   echo ""
   echo "[$(date '+%H:%M:%S')] Verify phase finished (exit: $VERIFY_EXIT)"
@@ -116,6 +128,7 @@ echo "[$(date '+%H:%M:%S')] Phase 3: FIX"
 echo ""
 FIX_CMD="$SCRIPT_DIR/audit-fix --max $FIX_MAX"
 [ -n "$MODEL" ] && FIX_CMD="$FIX_CMD --model $MODEL"
+[ -n "$EFFORT" ] && FIX_CMD="$FIX_CMD --effort $EFFORT"
 $FIX_CMD && FIX_EXIT=0 || FIX_EXIT=$?
 
 END_TIME=$(date +%s)

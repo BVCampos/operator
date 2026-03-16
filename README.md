@@ -86,9 +86,10 @@ Files: `audit-report-verified.md`
 Fixes all sections in parallel using git worktrees — one isolated worktree per section. Each section's fixes are cherry-picked back to the main branch, then tests run once on the combined result.
 
 ```bash
-operator audit fix                  # fix all unfixed sections in parallel
-operator audit fix --max 5          # limit to 5 sections at a time
-operator audit fix --model sonnet   # use a faster model
+operator audit fix                              # fix all unfixed sections in parallel
+operator audit fix --max 5                      # limit to 5 sections at a time
+operator audit fix --model sonnet               # use a faster model
+operator audit fix --model sonnet --effort low  # fast fixes
 ```
 
 Uses the verified report if available (skipping false positives).
@@ -100,11 +101,11 @@ Files: `audit-fix-progress.md`, `audit-fix-changelog.md`, `.audit-fix-worktrees/
 Runs audit → verify → fix in sequence:
 
 ```bash
-operator audit full                       # audit and fix: 10 iterations each
-operator audit full --max 5               # audit and fix: 5 iterations each
+operator audit full                                     # audit and fix: 20 iterations each
+operator audit full --max 5                             # audit and fix: 5 iterations each
 operator audit full --audit-max 5 --fix-max 10
-operator audit full --model sonnet        # use faster model for fix phase
-operator audit full --skip-verify         # skip verification
+operator audit full --model sonnet --effort low         # fast pipeline
+operator audit full --skip-verify                       # skip verification
 ```
 
 ### `operator ralph` — autonomous PRD implementation
@@ -150,6 +151,24 @@ Every loop follows the same pattern:
 2. Each iteration calls `claude --dangerously-skip-permissions --print` with a **prompt file**
 3. Claude reads state from previous iterations, does work, updates state
 4. The bash script checks for completion signals and decides whether to continue
+
+### Model and effort
+
+All commands accept `--model` and `--effort` to control which Claude model runs and how much thinking it does:
+
+```bash
+operator review --model sonnet              # use a specific model
+operator audit --effort high                # more thorough thinking
+operator audit full --model sonnet --effort low   # fast audit pipeline
+operator ralph start --prd tasks/feature.md --model opus --effort max
+```
+
+| Flag | Values | Default |
+|------|--------|---------|
+| `--model MODEL` | `sonnet`, `opus`, `haiku`, or full model ID | Claude's default |
+| `--effort LEVEL` | `low`, `medium`, `high`, `max` | Claude's default |
+
+For `audit full`, both flags are passed through to all three phases (audit, verify, fix).
 
 ### Customizing prompts
 
