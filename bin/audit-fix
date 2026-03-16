@@ -15,10 +15,15 @@ setup_log "audit-fix"
 MAX_SECTIONS=0  # 0 = all unfixed
 MODEL=""
 EFFORT=""
+NO_COMMIT=true
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --commit)
+      NO_COMMIT=false
+      shift
+      ;;
     --max)
       MAX_SECTIONS="$2"
       shift 2
@@ -38,6 +43,7 @@ while [[ $# -gt 0 ]]; do
       echo "Cherry-picks commits back, then runs tests once on the combined result."
       echo ""
       echo "Options:"
+      echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --max N          Max sections to fix in parallel (default: all)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
@@ -130,6 +136,7 @@ echo "================================================"
 echo "  Audit Fix — $SECTION_COUNT sections in parallel"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+[ "$NO_COMMIT" = false ] && echo "  Commit:   enabled"
 echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $BASE_BRANCH"
 echo "  Report:   $(basename "$REPORT_FILE")"
@@ -285,8 +292,10 @@ for i in "${!SECTIONS[@]}"; do
   COMMITS=$(git log --reverse --format="%H" "$BASE_COMMIT..$branch" 2>/dev/null)
 
   ok=true
+  CP_FLAGS="--no-edit"
+  [ "$NO_COMMIT" = true ] && CP_FLAGS="$CP_FLAGS --no-commit"
   for commit in $COMMITS; do
-    if ! git cherry-pick "$commit" --no-edit 2>/dev/null; then
+    if ! git cherry-pick $CP_FLAGS "$commit" 2>/dev/null; then
       git cherry-pick --abort 2>/dev/null || true
       CONFLICT_SECTIONS+=("$section")
       ok=false
@@ -421,9 +430,11 @@ fi
   echo ""
 } >> "$CHANGELOG_FILE"
 
-# Commit progress + changelog
+# Commit progress + changelog (only if --commit)
 git add "$PROGRESS_FILE" "$CHANGELOG_FILE" 2>/dev/null || true
-git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
+if [ "$NO_COMMIT" = false ]; then
+  git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
+fi
 
 END_TIME=$(date +%s)
 ELAPSED=$(( END_TIME - START_TIME ))

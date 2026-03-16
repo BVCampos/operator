@@ -16,6 +16,7 @@ setup_log "review-loop"
 MAX_ITERATIONS=3
 MODEL=""
 EFFORT=""
+NO_COMMIT=true
 
 # Parse arguments
 REVIEW_ONLY=false
@@ -35,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --commit)
+      NO_COMMIT=false
+      shift
+      ;;
     --review-only)
       REVIEW_ONLY=true
       shift
@@ -52,6 +57,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Max iterations (default: 3)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max (default: Claude's default)"
+      echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --review-only    Only run the review phase (no fixes)"
       echo "  --fix-only       Only run the fix phase (assumes review-report.md exists)"
       echo ""
@@ -101,6 +107,7 @@ echo "  Project: $PROJECT_DIR"
 echo "  Branch:  $(git branch --show-current)"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
+[ "$NO_COMMIT" = false ] && echo "  Commit:  enabled"
 echo "  Log:     $LOG_FILE"
 echo "  Changed: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
 echo "================================================"
@@ -195,9 +202,17 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     exit 1
   fi
 
+  # Build fix prompt (append no-commit override if needed)
+  FIX_INPUT="$FIX_PROMPT"
+  if [ "$NO_COMMIT" = true ]; then
+    FIX_INPUT=$(mktemp)
+    cat "$FIX_PROMPT" > "$FIX_INPUT"
+    printf '\n## OVERRIDE: No Commit\n\nDo NOT run git commit. Stage all changes with `git add` but leave them uncommitted. Skip step 6 entirely.\n' >> "$FIX_INPUT"
+  fi
+
   # Run claude in background
   FIX_OUT=$(mktemp)
-  command $CLAUDE_CMD < "$FIX_PROMPT" > "$FIX_OUT" 2>&1 &
+  command $CLAUDE_CMD < "$FIX_INPUT" > "$FIX_OUT" 2>&1 &
   CLAUDE_PID=$!
   log "Claude fix started (PID: $CLAUDE_PID)"
 
@@ -207,6 +222,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   wait $CLAUDE_PID || true
   OUTPUT=$(cat "$FIX_OUT")
   rm -f "$FIX_OUT"
+  [ "$NO_COMMIT" = true ] && rm -f "$FIX_INPUT"
 
   LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
   log "Fix output: $LINES lines"
