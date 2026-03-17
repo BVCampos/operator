@@ -31,8 +31,12 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --timeout)
+      CLAUDE_TIMEOUT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: audit-loop [--max N] [--model MODEL] [--effort LEVEL]"
+      echo "Usage: audit-loop [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
       echo ""
       echo "Systematically audits the codebase section by section."
       echo "Each iteration picks an uncovered section and spawns specialist agents."
@@ -41,6 +45,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Max iterations (default: 20)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude if an iteration exceeds MIN minutes (default: 30)"
       echo ""
       echo "Files created in project root:"
       echo "  audit-progress.md   Tracks which sections have been audited"
@@ -101,6 +106,7 @@ echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $(git branch --show-current)"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Timeout:  ${CLAUDE_TIMEOUT}m per iteration"
 echo "  Files:    $TOTAL_FILES tracked files"
 echo "  Progress: $PROGRESS_INFO"
 echo "  Log:      $LOG_FILE"
@@ -134,9 +140,16 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   spin $CLAUDE_PID "Auditing codebase"
 
-  wait $CLAUDE_PID || true
+  wait $CLAUDE_PID 2>/dev/null || true
   OUTPUT=$(cat "$AUDIT_OUT")
   rm -f "$AUDIT_OUT"
+
+  # If timed out, skip this iteration and retry
+  if [ "$SPIN_TIMED_OUT" = true ]; then
+    log "Iteration $i timed out after ${CLAUDE_TIMEOUT}m — retrying"
+    sleep 2
+    continue
+  fi
 
   LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
   log "Audit output: $LINES lines"

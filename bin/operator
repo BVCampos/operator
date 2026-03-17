@@ -29,6 +29,7 @@ Commands:
 Global options (supported by all commands):
   --model MODEL                       Claude model (e.g., sonnet, opus, haiku)
   --effort LEVEL                      Thinking effort: low, medium, high, max
+  --timeout MIN                       Kill hung claude after MIN minutes (default: 30)
   --help, -h                          Show this help
   --version, -v                       Show version
 

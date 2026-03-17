@@ -36,8 +36,12 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --timeout)
+      CLAUDE_TIMEOUT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: audit-fix [--max N] [--model MODEL] [--effort LEVEL]"
+      echo "Usage: audit-fix [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
       echo ""
       echo "Fixes audit findings in parallel — one worktree per section."
       echo "Cherry-picks commits back, then runs tests once on the combined result."
@@ -47,6 +51,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Max sections to fix in parallel (default: all)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude if fixing exceeds MIN minutes (default: 30)"
       exit 0
       ;;
     *)
@@ -136,6 +141,7 @@ echo "================================================"
 echo "  Audit Fix — $SECTION_COUNT sections in parallel"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Timeout:  ${CLAUDE_TIMEOUT}m"
 [ "$NO_COMMIT" = false ] && echo "  Commit:   enabled"
 echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $BASE_BRANCH"
@@ -231,43 +237,15 @@ echo ""
 
 # ── Wait with combined spinner ──────────────────────────────────────
 
-spin_all() {
-  if [ ! -t 1 ]; then
-    echo "  Fixing findings — $# sections..."
-    for pid in "$@"; do wait "$pid" 2>/dev/null || true; done
-    echo "  ✓ All sections fixed"
-    return
-  fi
-
-  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0 start=$SECONDS total=$#
-
-  while true; do
-    local running=0
-    for pid in "$@"; do
-      kill -0 "$pid" 2>/dev/null && running=$((running + 1))
-    done
-    [ $running -eq 0 ] && break
-
-    local elapsed=$(( SECONDS - start ))
-    printf "\033[2K\r  %s Fixing findings — %d/%d sections complete (%dm%02ds)" \
-      "${chars:i++%${#chars}:1}" "$(( total - running ))" "$total" \
-      "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
-    sleep 0.1
-  done
-
-  local t=$(( SECONDS - start ))
-  printf "\033[2K\r  ✓ All %d sections fixed (%dm%02ds)\n" "$total" "$(( t / 60 ))" "$(( t % 60 ))"
-}
-
-spin_all "${PIDS[@]}"
+spin_all "Fixing findings" "${PIDS[@]}"
 
 FAILURES=0
 for pid in "${PIDS[@]}"; do
-  wait "$pid" || FAILURES=$((FAILURES + 1))
+  wait "$pid" 2>/dev/null || FAILURES=$((FAILURES + 1))
 done
 
 echo ""
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: fix phase timed out after ${CLAUDE_TIMEOUT}m — some sections may be incomplete"
 [ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had errors"
 
 # ── Cherry-pick commits back to main branch ─────────────────────────

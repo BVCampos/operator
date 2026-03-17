@@ -30,8 +30,12 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --timeout)
+      CLAUDE_TIMEOUT="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: audit-verify [--model MODEL] [--effort LEVEL]"
+      echo "Usage: audit-verify [--model MODEL] [--effort LEVEL] [--timeout MIN]"
       echo ""
       echo "Verifies all audit findings in parallel — one agent per section."
       echo "Run after 'operator audit', before 'operator audit fix'."
@@ -39,6 +43,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude if verification exceeds MIN minutes (default: 30)"
       echo ""
       echo "Files:"
       echo "  audit-report.md            Input (required)"
@@ -106,6 +111,7 @@ echo "  Audit Verify — $SECTION_COUNT sections in parallel"
 echo "  Project:  $PROJECT_DIR"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Timeout:  ${CLAUDE_TIMEOUT}m"
 echo "  Report:   $REPORT_FILE ($REPORT_LINES lines)"
 echo "  Log:      $LOG_FILE"
 echo "================================================"
@@ -165,47 +171,7 @@ done
 
 echo ""
 
-# Combined spinner showing progress across all parallel instances
-spin_all() {
-  # Non-TTY fallback (log files, pipes)
-  if [ ! -t 1 ]; then
-    echo "  Verifying findings — $# sections..."
-    for pid in "$@"; do
-      wait "$pid" 2>/dev/null || true
-    done
-    echo "  ✓ All sections verified"
-    return
-  fi
-
-  local chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-  local i=0
-  local start=$SECONDS
-  local total=$#
-
-  while true; do
-    local running=0
-    for pid in "$@"; do
-      kill -0 "$pid" 2>/dev/null && running=$((running + 1))
-    done
-
-    [ $running -eq 0 ] && break
-
-    local elapsed=$(( SECONDS - start ))
-    local mins=$(( elapsed / 60 ))
-    local secs=$(( elapsed % 60 ))
-    local done_count=$(( total - running ))
-    printf "\033[2K\r  %s Verifying findings — %d/%d sections complete (%dm%02ds)" \
-      "${chars:i++%${#chars}:1}" "$done_count" "$total" "$mins" "$secs"
-    sleep 0.1
-  done
-
-  local total_time=$(( SECONDS - start ))
-  local mins=$(( total_time / 60 ))
-  local secs=$(( total_time % 60 ))
-  printf "\033[2K\r  ✓ All %d sections verified (%dm%02ds)\n" "$total" "$mins" "$secs"
-}
-
-spin_all "${PIDS[@]}"
+spin_all "Verifying findings" "${PIDS[@]}"
 
 # Wait for all processes and collect exit codes
 FAILURES=0
@@ -214,6 +180,7 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo ""
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: verification timed out after ${CLAUDE_TIMEOUT}m — some sections may be incomplete"
 [ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had verification errors"
 
 # Combine results into verified report

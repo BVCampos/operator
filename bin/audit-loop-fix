@@ -44,12 +44,16 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --timeout)
+      TIMEOUT="$2"
+      shift 2
+      ;;
     --skip-verify)
       SKIP_VERIFY=true
       shift
       ;;
     -h|--help)
-      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--skip-verify]"
+      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-verify]"
       echo ""
       echo "Runs audit-loop → audit-verify → audit-fix in sequence."
       echo ""
@@ -60,6 +64,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude if a step exceeds MIN minutes (default: 30)"
       echo "  --skip-verify    Skip the verification step"
       exit 0
       ;;
@@ -86,8 +91,9 @@ else
 fi
 echo "  Fix:    up to $FIX_MAX sections in parallel"
 [ -n "$COMMIT_FLAG" ] && echo "  Commit: enabled"
-[ -n "$MODEL" ] && echo "  Model:  $MODEL"
-[ -n "$EFFORT" ] && echo "  Effort: $EFFORT"
+[ -n "$MODEL" ] && echo "  Model:   $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
+[ -n "$TIMEOUT" ] && echo "  Timeout: ${TIMEOUT}m per step"
 echo "================================================"
 echo ""
 
@@ -99,6 +105,7 @@ echo ""
 AUDIT_CMD="$SCRIPT_DIR/audit-loop --max $AUDIT_MAX"
 [ -n "$MODEL" ] && AUDIT_CMD="$AUDIT_CMD --model $MODEL"
 [ -n "$EFFORT" ] && AUDIT_CMD="$AUDIT_CMD --effort $EFFORT"
+[ -n "$TIMEOUT" ] && AUDIT_CMD="$AUDIT_CMD --timeout $TIMEOUT"
 $AUDIT_CMD && AUDIT_EXIT=0 || AUDIT_EXIT=$?
 
 echo ""
@@ -123,6 +130,7 @@ if [ "$SKIP_VERIFY" = false ]; then
   VERIFY_CMD="$SCRIPT_DIR/audit-verify"
   [ -n "$MODEL" ] && VERIFY_CMD="$VERIFY_CMD --model $MODEL"
   [ -n "$EFFORT" ] && VERIFY_CMD="$VERIFY_CMD --effort $EFFORT"
+  [ -n "$TIMEOUT" ] && VERIFY_CMD="$VERIFY_CMD --timeout $TIMEOUT"
   $VERIFY_CMD && VERIFY_EXIT=0 || VERIFY_EXIT=$?
 
   echo ""
@@ -137,6 +145,7 @@ FIX_CMD="$SCRIPT_DIR/audit-fix --max $FIX_MAX"
 [ -n "$COMMIT_FLAG" ] && FIX_CMD="$FIX_CMD --commit"
 [ -n "$MODEL" ] && FIX_CMD="$FIX_CMD --model $MODEL"
 [ -n "$EFFORT" ] && FIX_CMD="$FIX_CMD --effort $EFFORT"
+[ -n "$TIMEOUT" ] && FIX_CMD="$FIX_CMD --timeout $TIMEOUT"
 $FIX_CMD && FIX_EXIT=0 || FIX_EXIT=$?
 
 END_TIME=$(date +%s)

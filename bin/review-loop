@@ -36,6 +36,10 @@ while [[ $# -gt 0 ]]; do
       EFFORT="$2"
       shift 2
       ;;
+    --timeout)
+      CLAUDE_TIMEOUT="$2"
+      shift 2
+      ;;
     --commit)
       NO_COMMIT=false
       shift
@@ -49,7 +53,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      echo "Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--review-only] [--fix-only]"
+      echo "Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--review-only] [--fix-only]"
       echo ""
       echo "Runs a review → fix loop on the current branch's changes."
       echo ""
@@ -57,6 +61,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Max iterations (default: 3)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max (default: Claude's default)"
+      echo "  --timeout MIN    Kill claude if a phase exceeds MIN minutes (default: 30)"
       echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --review-only    Only run the review phase (no fixes)"
       echo "  --fix-only       Only run the fix phase (assumes review-report.md exists)"
@@ -108,6 +113,7 @@ echo "  Branch:  $(git branch --show-current)"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
 [ "$NO_COMMIT" = false ] && echo "  Commit:  enabled"
+echo "  Timeout: ${CLAUDE_TIMEOUT}m per phase"
 echo "  Log:     $LOG_FILE"
 echo "  Changed: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
 echo "================================================"
@@ -141,9 +147,16 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     spin $CLAUDE_PID "Reviewing code"
 
     # Wait for exit code
-    wait $CLAUDE_PID || true
+    wait $CLAUDE_PID 2>/dev/null || true
     OUTPUT=$(cat "$REVIEW_OUT")
     rm -f "$REVIEW_OUT"
+
+    # If timed out, retry the iteration
+    if [ "$SPIN_TIMED_OUT" = true ]; then
+      log "Review phase timed out after ${CLAUDE_TIMEOUT}m — retrying"
+      sleep 2
+      continue
+    fi
 
     # Log a preview of the output
     LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
@@ -219,10 +232,17 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Show spinner
   spin $CLAUDE_PID "Fixing issues"
 
-  wait $CLAUDE_PID || true
+  wait $CLAUDE_PID 2>/dev/null || true
   OUTPUT=$(cat "$FIX_OUT")
   rm -f "$FIX_OUT"
   [ "$NO_COMMIT" = true ] && rm -f "$FIX_INPUT"
+
+  # If timed out, retry the iteration
+  if [ "$SPIN_TIMED_OUT" = true ]; then
+    log "Fix phase timed out after ${CLAUDE_TIMEOUT}m — retrying"
+    sleep 2
+    continue
+  fi
 
   LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
   log "Fix output: $LINES lines"
