@@ -17,16 +17,38 @@ If the findings have verdicts (from verification):
 - Only fix **CONFIRMED** and **WRONG_SEVERITY** findings
 - Skip FALSE_POSITIVE, DUPLICATE, and BY_DESIGN findings
 
-### 2. Type check
+### 2. Verify changes
 
-After fixing ALL issues, run type checking to verify your changes compile:
+After fixing ALL issues, run these checks **on the files you changed** and fix any errors they surface. Repeat until all pass.
+
+**a) Type check:**
 ```bash
 npx tsc --noEmit
 ```
 
-If type checking fails, fix the type errors.
+**b) Lint (only changed files):**
+```bash
+npx eslint --no-warn-ignored <changed files>
+```
+If the project uses `biome` instead of `eslint`, use `npx biome check <changed files>`.
+If neither tool is configured, skip this step.
 
-**Do NOT run the full test suite** — tests will be run once after all sections are merged.
+**c) Format (only changed files):**
+```bash
+npx prettier --check <changed files>
+```
+If formatting fails, run `npx prettier --write <changed files>` to fix.
+If the project uses `biome` for formatting, use `npx biome format <changed files>`.
+If no formatter is configured, skip this step.
+
+**d) Tests (only related tests):**
+If there are test files directly related to the files you changed (co-located `*.test.*` or `*.spec.*` files), run them:
+```bash
+npx vitest run <test files> --reporter=verbose
+```
+Use the project's test runner (`vitest`, `jest`, etc.). If no related tests exist, skip this step.
+
+Fix any errors from these checks before committing. **Do NOT run the full test suite** — the full suite will run once after all sections are merged.
 
 ### 3. Commit
 

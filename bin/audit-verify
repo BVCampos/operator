@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
       echo "Options:"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
-      echo "  --timeout MIN    Kill claude if verification exceeds MIN minutes (default: 30)"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo ""
       echo "Files:"
       echo "  audit-report.md            Input (required)"
@@ -111,7 +111,7 @@ echo "  Audit Verify — $SECTION_COUNT sections in parallel"
 echo "  Project:  $PROJECT_DIR"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
-echo "  Timeout:  ${CLAUDE_TIMEOUT}m"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
 echo "  Report:   $REPORT_FILE ($REPORT_LINES lines)"
 echo "  Log:      $LOG_FILE"
 echo "================================================"
@@ -171,7 +171,7 @@ done
 
 echo ""
 
-spin_all "Verifying findings" "${PIDS[@]}"
+spin_all "Verifying findings" "$WORK_DIR" "${PIDS[@]}"
 
 # Wait for all processes and collect exit codes
 FAILURES=0
@@ -180,7 +180,7 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo ""
-[ "$SPIN_TIMED_OUT" = true ] && log "Warning: verification timed out after ${CLAUDE_TIMEOUT}m — some sections may be incomplete"
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: verification stalled (no output for ${CLAUDE_TIMEOUT}m) — some sections may be incomplete"
 [ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had verification errors"
 
 # Combine results into verified report

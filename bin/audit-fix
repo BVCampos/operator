@@ -7,15 +7,18 @@ set -e
 OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 FIX_PROMPT="$PROMPTS_DIR/audit-fix-phase.md"
+REPAIR_PROMPT="$PROMPTS_DIR/audit-fix-repair-phase.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-fix"
 
 # Defaults
 MAX_SECTIONS=0  # 0 = all unfixed
+MAX_REPAIRS=3
 MODEL=""
 EFFORT=""
 NO_COMMIT=true
+NO_REPAIR=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -23,6 +26,14 @@ while [[ $# -gt 0 ]]; do
     --commit)
       NO_COMMIT=false
       shift
+      ;;
+    --no-repair)
+      NO_REPAIR=true
+      shift
+      ;;
+    --max-repairs)
+      MAX_REPAIRS="$2"
+      shift 2
       ;;
     --max)
       MAX_SECTIONS="$2"
@@ -44,14 +55,16 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: audit-fix [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
       echo ""
       echo "Fixes audit findings in parallel — one worktree per section."
-      echo "Cherry-picks commits back, then runs tests once on the combined result."
+      echo "Cherry-picks commits back, runs checks, and auto-repairs any breakages."
       echo ""
       echo "Options:"
       echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --max N          Max sections to fix in parallel (default: all)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
-      echo "  --timeout MIN    Kill claude if fixing exceeds MIN minutes (default: 30)"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo "  --no-repair      Skip the auto-repair phase if checks fail"
+      echo "  --max-repairs N  Max repair iterations (default: 3)"
       exit 0
       ;;
     *)
@@ -141,7 +154,8 @@ echo "================================================"
 echo "  Audit Fix — $SECTION_COUNT sections in parallel"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
-echo "  Timeout:  ${CLAUDE_TIMEOUT}m"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+[ "$NO_REPAIR" = true ] && echo "  Repair:   disabled"
 [ "$NO_COMMIT" = false ] && echo "  Commit:   enabled"
 echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $BASE_BRANCH"
@@ -237,7 +251,7 @@ echo ""
 
 # ── Wait with combined spinner ──────────────────────────────────────
 
-spin_all "Fixing findings" "${PIDS[@]}"
+spin_all "Fixing findings" "$WORK_DIR" "${PIDS[@]}"
 
 FAILURES=0
 for pid in "${PIDS[@]}"; do
@@ -245,7 +259,7 @@ for pid in "${PIDS[@]}"; do
 done
 
 echo ""
-[ "$SPIN_TIMED_OUT" = true ] && log "Warning: fix phase timed out after ${CLAUDE_TIMEOUT}m — some sections may be incomplete"
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: fix phase stalled (no output for ${CLAUDE_TIMEOUT}m) — some sections may be incomplete"
 [ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had errors"
 
 # ── Cherry-pick commits back to main branch ─────────────────────────
@@ -308,12 +322,20 @@ for i in "${!SECTIONS[@]}"; do
   fi
 done
 
-# ── Run tests once on the combined result ───────────────────────────
+# ── Run checks on the combined result ─────────────────────────────
 
 TSC_OK=true
+LINT_OK=true
+FORMAT_OK=true
 TESTS_OK=true
+ALL_CHECKS_OK=true
+CHECK_ERRORS=""
+REPAIR_ITERATION=0
 
-if [ "$MERGED" -gt 0 ] && [ -f "$PROJECT_DIR/package.json" ]; then
+run_checks() {
+  TSC_OK=true; LINT_OK=true; FORMAT_OK=true; TESTS_OK=true
+  CHECK_ERRORS=""
+
   echo ""
   log "Running verification on combined result..."
 
@@ -327,11 +349,67 @@ if [ "$MERGED" -gt 0 ] && [ -f "$PROJECT_DIR/package.json" ]; then
   if [ "$TSC_OK" = true ]; then
     log "  tsc: clean"
   else
-    TSC_ERRORS=$(grep -c "error TS" "$TSC_OUT" 2>/dev/null) || TSC_ERRORS=0
-    log "  tsc: $TSC_ERRORS errors"
-    tail -20 "$TSC_OUT"
+    TSC_ERRORS_COUNT=$(grep -c "error TS" "$TSC_OUT" 2>/dev/null) || TSC_ERRORS_COUNT=0
+    log "  tsc: $TSC_ERRORS_COUNT errors"
+    CHECK_ERRORS+=$'\n## tsc errors\n```\n'
+    CHECK_ERRORS+="$(tail -40 "$TSC_OUT")"
+    CHECK_ERRORS+=$'\n```\n'
   fi
   rm -f "$TSC_OUT"
+
+  # Lint
+  LINT_OUT=$(mktemp)
+  if (cd "$PROJECT_DIR" && npx eslint --version &>/dev/null); then
+    (cd "$PROJECT_DIR" && npx eslint . 2>&1) > "$LINT_OUT" &
+    LINT_PID=$!
+    spin $LINT_PID "Linting (eslint)"
+    wait $LINT_PID && LINT_OK=true || LINT_OK=false
+  elif (cd "$PROJECT_DIR" && npx biome --version &>/dev/null); then
+    (cd "$PROJECT_DIR" && npx biome check . 2>&1) > "$LINT_OUT" &
+    LINT_PID=$!
+    spin $LINT_PID "Linting (biome)"
+    wait $LINT_PID && LINT_OK=true || LINT_OK=false
+  else
+    log "  lint: no linter found, skipping"
+  fi
+
+  if [ "$LINT_OK" = true ]; then
+    log "  lint: clean"
+  elif [ -s "$LINT_OUT" ]; then
+    LINT_ERRORS_COUNT=$(wc -l < "$LINT_OUT" | tr -d ' ')
+    log "  lint: errors ($LINT_ERRORS_COUNT lines)"
+    CHECK_ERRORS+=$'\n## Lint errors\n```\n'
+    CHECK_ERRORS+="$(tail -50 "$LINT_OUT")"
+    CHECK_ERRORS+=$'\n```\n'
+  fi
+  rm -f "$LINT_OUT"
+
+  # Format
+  FORMAT_OUT=$(mktemp)
+  if (cd "$PROJECT_DIR" && npx prettier --version &>/dev/null); then
+    (cd "$PROJECT_DIR" && npx prettier --check . 2>&1) > "$FORMAT_OUT" &
+    FORMAT_PID=$!
+    spin $FORMAT_PID "Format check (prettier)"
+    wait $FORMAT_PID && FORMAT_OK=true || FORMAT_OK=false
+  elif (cd "$PROJECT_DIR" && npx biome --version &>/dev/null) && [ "$LINT_OK" != false ]; then
+    (cd "$PROJECT_DIR" && npx biome format . 2>&1) > "$FORMAT_OUT" &
+    FORMAT_PID=$!
+    spin $FORMAT_PID "Format check (biome)"
+    wait $FORMAT_PID && FORMAT_OK=true || FORMAT_OK=false
+  else
+    log "  format: no formatter found, skipping"
+  fi
+
+  if [ "$FORMAT_OK" = true ]; then
+    log "  format: clean"
+  elif [ -s "$FORMAT_OUT" ]; then
+    FORMAT_ERRORS_COUNT=$(wc -l < "$FORMAT_OUT" | tr -d ' ')
+    log "  format: issues ($FORMAT_ERRORS_COUNT lines)"
+    CHECK_ERRORS+=$'\n## Format errors\n```\n'
+    CHECK_ERRORS+="$(tail -30 "$FORMAT_OUT")"
+    CHECK_ERRORS+=$'\n```\n'
+  fi
+  rm -f "$FORMAT_OUT"
 
   # Test suite
   TEST_OUT=$(mktemp)
@@ -344,9 +422,67 @@ if [ "$MERGED" -gt 0 ] && [ -f "$PROJECT_DIR/package.json" ]; then
     log "  tests: passing"
   else
     log "  tests: failures detected"
-    tail -30 "$TEST_OUT"
+    CHECK_ERRORS+=$'\n## Test failures\n```\n'
+    CHECK_ERRORS+="$(tail -50 "$TEST_OUT")"
+    CHECK_ERRORS+=$'\n```\n'
   fi
   rm -f "$TEST_OUT"
+
+  # Overall status
+  if [ "$TSC_OK" = true ] && [ "$LINT_OK" = true ] && [ "$FORMAT_OK" = true ] && [ "$TESTS_OK" = true ]; then
+    ALL_CHECKS_OK=true
+  else
+    ALL_CHECKS_OK=false
+  fi
+}
+
+if [ "$MERGED" -gt 0 ] && [ -f "$PROJECT_DIR/package.json" ]; then
+  run_checks
+
+  # ── Auto-repair loop ────────────────────────────────────────────────
+
+  if [ "$ALL_CHECKS_OK" = false ] && [ "$NO_REPAIR" = false ]; then
+    REPAIR_TEMPLATE=$(cat "$REPAIR_PROMPT")
+
+    while [ "$ALL_CHECKS_OK" = false ] && [ "$REPAIR_ITERATION" -lt "$MAX_REPAIRS" ]; do
+      REPAIR_ITERATION=$((REPAIR_ITERATION + 1))
+      echo ""
+      log "Repair iteration $REPAIR_ITERATION/$MAX_REPAIRS — launching Claude to fix breakages..."
+
+      REPAIR_INPUT=$(mktemp)
+      cat > "$REPAIR_INPUT" <<REPAIR_EOF
+$REPAIR_TEMPLATE
+
+---
+
+## Failing checks (repair iteration $REPAIR_ITERATION)
+
+$CHECK_ERRORS
+REPAIR_EOF
+
+      REPAIR_OUT=$(mktemp)
+      (cd "$PROJECT_DIR" && command $CLAUDE_CMD < "$REPAIR_INPUT" > "$REPAIR_OUT" 2>&1) &
+      REPAIR_PID=$!
+      spin $REPAIR_PID "Repairing (iteration $REPAIR_ITERATION)" "$REPAIR_OUT"
+      wait $REPAIR_PID 2>/dev/null || true
+
+      if [ -s "$REPAIR_OUT" ]; then
+        log "--- Repair output (iteration $REPAIR_ITERATION) ---"
+        cat "$REPAIR_OUT"
+        cat "$REPAIR_OUT" >> "$LOG_FILE"
+      fi
+      rm -f "$REPAIR_INPUT" "$REPAIR_OUT"
+
+      # Re-run checks
+      run_checks
+    done
+
+    if [ "$ALL_CHECKS_OK" = false ]; then
+      log "Warning: checks still failing after $MAX_REPAIRS repair iterations"
+    else
+      log "Repair successful after $REPAIR_ITERATION iteration(s)"
+    fi
+  fi
 fi
 
 # ── Update progress and changelog ───────────────────────────────────
@@ -402,7 +538,10 @@ fi
 
   echo "### Verification"
   echo "- tsc: $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"
+  echo "- lint: $([ "$LINT_OK" = true ] && echo "clean" || echo "errors")"
+  echo "- format: $([ "$FORMAT_OK" = true ] && echo "clean" || echo "errors")"
   echo "- tests: $([ "$TESTS_OK" = true ] && echo "passing" || echo "failures")"
+  [ "$REPAIR_ITERATION" -gt 0 ] && echo "- repair: $REPAIR_ITERATION iteration(s), $([ "$ALL_CHECKS_OK" = true ] && echo "fixed" || echo "still failing")"
   echo ""
   echo "---"
   echo ""
@@ -423,7 +562,10 @@ log "  Audit Fix complete! ($((ELAPSED / 60))m$((ELAPSED % 60))s)"
 log "  Sections fixed: $MERGED/$SECTION_COUNT"
 [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "  Conflicts:      ${CONFLICT_SECTIONS[*]}"
 [ "$MERGED" -gt 0 ] && log "  tsc:            $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"
+[ "$MERGED" -gt 0 ] && log "  lint:           $([ "$LINT_OK" = true ] && echo "clean" || echo "errors")"
+[ "$MERGED" -gt 0 ] && log "  format:         $([ "$FORMAT_OK" = true ] && echo "clean" || echo "errors")"
 [ "$MERGED" -gt 0 ] && log "  tests:          $([ "$TESTS_OK" = true ] && echo "passing" || echo "failures")"
+[ "$REPAIR_ITERATION" -gt 0 ] && log "  repair:         $REPAIR_ITERATION iteration(s)"
 log "  Progress:       $PROGRESS_FILE"
 log "  Changelog:      $CHANGELOG_FILE"
 log "================================================"

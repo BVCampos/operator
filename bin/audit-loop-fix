@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
-      echo "  --timeout MIN    Kill claude if a step exceeds MIN minutes (default: 30)"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo "  --skip-verify    Skip the verification step"
       exit 0
       ;;
@@ -93,7 +93,7 @@ echo "  Fix:    up to $FIX_MAX sections in parallel"
 [ -n "$COMMIT_FLAG" ] && echo "  Commit: enabled"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
-[ -n "$TIMEOUT" ] && echo "  Timeout: ${TIMEOUT}m per step"
+[ -n "$TIMEOUT" ] && echo "  Stall:   kill after ${TIMEOUT}m with no output"
 echo "================================================"
 echo ""
 

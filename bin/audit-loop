@@ -45,7 +45,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --max N          Max iterations (default: 20)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
-      echo "  --timeout MIN    Kill claude if an iteration exceeds MIN minutes (default: 30)"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo ""
       echo "Files created in project root:"
       echo "  audit-progress.md   Tracks which sections have been audited"
@@ -106,7 +106,7 @@ echo "  Project:  $PROJECT_DIR"
 echo "  Branch:   $(git branch --show-current)"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
-echo "  Timeout:  ${CLAUDE_TIMEOUT}m per iteration"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
 echo "  Files:    $TOTAL_FILES tracked files"
 echo "  Progress: $PROGRESS_INFO"
 echo "  Log:      $LOG_FILE"
@@ -138,7 +138,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   CLAUDE_PID=$!
   log "Claude audit started (PID: $CLAUDE_PID)"
 
-  spin $CLAUDE_PID "Auditing codebase"
+  spin $CLAUDE_PID "Auditing codebase" "$AUDIT_OUT"
 
   wait $CLAUDE_PID 2>/dev/null || true
   OUTPUT=$(cat "$AUDIT_OUT")
@@ -146,7 +146,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # If timed out, skip this iteration and retry
   if [ "$SPIN_TIMED_OUT" = true ]; then
-    log "Iteration $i timed out after ${CLAUDE_TIMEOUT}m — retrying"
+    log "Iteration $i stalled (no output for ${CLAUDE_TIMEOUT}m) — retrying"
     sleep 2
     continue
   fi

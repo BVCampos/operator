@@ -238,7 +238,7 @@ $PRD_CONTENT"
   echo "$FULL_PROMPT" | command $CONVERT_CMD > "$CONVERT_OUT" 2>&1 &
   CLAUDE_PID=$!
   log "Claude conversion started (PID: $CLAUDE_PID)"
-  spin $CLAUDE_PID "Converting PRD to JSON"
+  spin $CLAUDE_PID "Converting PRD to JSON" "$CONVERT_OUT"
   wait $CLAUDE_PID || true
   RESULT=$(cat "$CONVERT_OUT")
   rm -f "$CONVERT_OUT"

@@ -52,7 +52,8 @@ Every loop script follows the same structure:
 - `fix-phase.md` — reads `review-report.md`, fixes issues, commits
 - `audit-phase.md` — maps codebase into sections, audits one per iteration using 3 parallel agents (DB auditor, bug hunter, consistency checker), appends to `audit-report.md`
 - `audit-verify-phase.md` — verification instructions for a single section (the bash script launches one Claude instance per section in parallel, prepending section findings to this template)
-- `audit-fix-phase.md` — single-section fix instructions (the bash script launches one Claude instance per section in parallel worktrees, each fixing and committing independently)
+- `audit-fix-phase.md` — single-section fix instructions (the bash script launches one Claude instance per section in parallel worktrees, each fixing and committing independently). Each section runs tsc, lint, prettier, and related tests on changed files before committing.
+- `audit-fix-repair-phase.md` — post-merge repair instructions. If tsc/lint/prettier/tests fail after merging all sections, Claude is launched to fix the breakages (up to `--max-repairs` iterations, default 3).
 
 ### State files
 
@@ -77,6 +78,6 @@ Loops persist state in the target project's root as markdown files. The bash scr
 
 - All scripts use `set -e` and `#!/bin/bash`
 - Scripts accept `--max N` or a bare number as iteration limit (except `audit-verify` which always runs one parallel pass)
-- `audit-fix` and `audit-verify` run all sections in parallel (one Claude instance per section). `audit-fix` uses git worktrees for isolation, cherry-picks commits back, and runs tsc + tests once on the combined result
+- `audit-fix` and `audit-verify` run all sections in parallel (one Claude instance per section). `audit-fix` uses git worktrees for isolation, cherry-picks commits back, runs tsc + lint + prettier + tests on the combined result, and auto-repairs any failures (disable with `--no-repair`)
 - `audit-fix` and `audit-loop-fix` accept `--model MODEL` to use a faster Claude model (e.g., `sonnet`) for the fix phase
 - Completion signals are XML-style tags in Claude's output (e.g., `<audit>COMPLETE</audit>`)
