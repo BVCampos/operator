@@ -78,12 +78,8 @@ case "$COMMAND" in
       reset)
         exec "$SCRIPT_DIR/audit-reset" "$@"
         ;;
-      --*)
-        # Flag passed directly to audit-loop (e.g., operator audit --max 5)
-        exec "$SCRIPT_DIR/audit-loop" "$SUBCMD" "$@"
-        ;;
       *)
-        # Number passed directly (e.g., operator audit 5)
+        # Flag or number passed directly to audit-loop (e.g., operator audit --max 5)
         exec "$SCRIPT_DIR/audit-loop" "$SUBCMD" "$@"
         ;;
     esac

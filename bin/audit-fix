@@ -15,13 +15,15 @@ setup_log "audit-fix"
 # Defaults
 MAX_SECTIONS=0  # 0 = all unfixed
 MAX_REPAIRS=3
-MODEL=""
-EFFORT=""
 NO_COMMIT=true
 NO_REPAIR=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --commit)
       NO_COMMIT=false
@@ -37,18 +39,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --max)
       MAX_SECTIONS="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
-      shift 2
-      ;;
-    --timeout)
-      CLAUDE_TIMEOUT="$2"
       shift 2
       ;;
     -h|--help)
@@ -79,19 +69,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate
-if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Error: Not inside a git repository."
-  exit 1
-fi
+validate_env
+build_claude_cmd
 
-if ! command -v claude &>/dev/null; then
-  echo "Error: claude CLI is required."
-  exit 1
-fi
-
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
-cd "$PROJECT_DIR"
 BASE_BRANCH=$(git branch --show-current)
 BASE_COMMIT=$(git rev-parse HEAD)
 
@@ -186,10 +166,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-CLAUDE_CMD="claude --dangerously-skip-permissions --print"
-[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
-[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
-
 START_TIME=$(date +%s)
 PIDS=()
 
@@ -197,8 +173,7 @@ for i in "${!SECTIONS[@]}"; do
   section="${SECTIONS[$i]}"
   idx=$((i + 1))
 
-  # Sanitize name for branch/dir
-  name=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+  name=$(sanitize_name "$section")
   SANITIZED_NAMES+=("$name")
 
   branch="audit-fix/$name"
@@ -218,12 +193,7 @@ for i in "${!SECTIONS[@]}"; do
   # Copy audit report into worktree (may not be in git)
   cp "$REPORT_FILE" "$wt/$(basename "$REPORT_FILE")" 2>/dev/null || true
 
-  # Extract this section's findings from the report
-  SECTION_CONTENT=$(awk -v header="## $section" '
-    $0 == header || index($0, header " — ") == 1 { found=1; print; next }
-    found && /^## / { exit }
-    found { print }
-  ' "$REPORT_FILE")
+  SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
 
   # Build per-section prompt
   cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
@@ -339,96 +309,26 @@ run_checks() {
   echo ""
   log "Running verification on combined result..."
 
-  # Type check
-  TSC_OUT=$(mktemp)
-  (cd "$PROJECT_DIR" && npx tsc --noEmit 2>&1) > "$TSC_OUT" &
-  TSC_PID=$!
-  spin $TSC_PID "Type checking"
-  wait $TSC_PID && TSC_OK=true || TSC_OK=false
+  run_check "Type checking" "tsc" "npx tsc --noEmit" && TSC_OK=true || TSC_OK=false
 
-  if [ "$TSC_OK" = true ]; then
-    log "  tsc: clean"
-  else
-    TSC_ERRORS_COUNT=$(grep -c "error TS" "$TSC_OUT" 2>/dev/null) || TSC_ERRORS_COUNT=0
-    log "  tsc: $TSC_ERRORS_COUNT errors"
-    CHECK_ERRORS+=$'\n## tsc errors\n```\n'
-    CHECK_ERRORS+="$(tail -40 "$TSC_OUT")"
-    CHECK_ERRORS+=$'\n```\n'
-  fi
-  rm -f "$TSC_OUT"
-
-  # Lint
-  LINT_OUT=$(mktemp)
   if (cd "$PROJECT_DIR" && npx eslint --version &>/dev/null); then
-    (cd "$PROJECT_DIR" && npx eslint . 2>&1) > "$LINT_OUT" &
-    LINT_PID=$!
-    spin $LINT_PID "Linting (eslint)"
-    wait $LINT_PID && LINT_OK=true || LINT_OK=false
+    run_check "Linting (eslint)" "lint" "npx eslint ." 50 && LINT_OK=true || LINT_OK=false
   elif (cd "$PROJECT_DIR" && npx biome --version &>/dev/null); then
-    (cd "$PROJECT_DIR" && npx biome check . 2>&1) > "$LINT_OUT" &
-    LINT_PID=$!
-    spin $LINT_PID "Linting (biome)"
-    wait $LINT_PID && LINT_OK=true || LINT_OK=false
+    run_check "Linting (biome)" "lint" "npx biome check ." 50 && LINT_OK=true || LINT_OK=false
   else
     log "  lint: no linter found, skipping"
   fi
 
-  if [ "$LINT_OK" = true ]; then
-    log "  lint: clean"
-  elif [ -s "$LINT_OUT" ]; then
-    LINT_ERRORS_COUNT=$(wc -l < "$LINT_OUT" | tr -d ' ')
-    log "  lint: errors ($LINT_ERRORS_COUNT lines)"
-    CHECK_ERRORS+=$'\n## Lint errors\n```\n'
-    CHECK_ERRORS+="$(tail -50 "$LINT_OUT")"
-    CHECK_ERRORS+=$'\n```\n'
-  fi
-  rm -f "$LINT_OUT"
-
-  # Format
-  FORMAT_OUT=$(mktemp)
   if (cd "$PROJECT_DIR" && npx prettier --version &>/dev/null); then
-    (cd "$PROJECT_DIR" && npx prettier --check . 2>&1) > "$FORMAT_OUT" &
-    FORMAT_PID=$!
-    spin $FORMAT_PID "Format check (prettier)"
-    wait $FORMAT_PID && FORMAT_OK=true || FORMAT_OK=false
+    run_check "Format check (prettier)" "format" "npx prettier --check ." 30 && FORMAT_OK=true || FORMAT_OK=false
   elif (cd "$PROJECT_DIR" && npx biome --version &>/dev/null) && [ "$LINT_OK" != false ]; then
-    (cd "$PROJECT_DIR" && npx biome format . 2>&1) > "$FORMAT_OUT" &
-    FORMAT_PID=$!
-    spin $FORMAT_PID "Format check (biome)"
-    wait $FORMAT_PID && FORMAT_OK=true || FORMAT_OK=false
+    run_check "Format check (biome)" "format" "npx biome format ." 30 && FORMAT_OK=true || FORMAT_OK=false
   else
     log "  format: no formatter found, skipping"
   fi
 
-  if [ "$FORMAT_OK" = true ]; then
-    log "  format: clean"
-  elif [ -s "$FORMAT_OUT" ]; then
-    FORMAT_ERRORS_COUNT=$(wc -l < "$FORMAT_OUT" | tr -d ' ')
-    log "  format: issues ($FORMAT_ERRORS_COUNT lines)"
-    CHECK_ERRORS+=$'\n## Format errors\n```\n'
-    CHECK_ERRORS+="$(tail -30 "$FORMAT_OUT")"
-    CHECK_ERRORS+=$'\n```\n'
-  fi
-  rm -f "$FORMAT_OUT"
+  run_check "Running tests" "tests" "npm test" 50 && TESTS_OK=true || TESTS_OK=false
 
-  # Test suite
-  TEST_OUT=$(mktemp)
-  (cd "$PROJECT_DIR" && npm test 2>&1) > "$TEST_OUT" &
-  TEST_PID=$!
-  spin $TEST_PID "Running tests"
-  wait $TEST_PID && TESTS_OK=true || TESTS_OK=false
-
-  if [ "$TESTS_OK" = true ]; then
-    log "  tests: passing"
-  else
-    log "  tests: failures detected"
-    CHECK_ERRORS+=$'\n## Test failures\n```\n'
-    CHECK_ERRORS+="$(tail -50 "$TEST_OUT")"
-    CHECK_ERRORS+=$'\n```\n'
-  fi
-  rm -f "$TEST_OUT"
-
-  # Overall status
   if [ "$TSC_OK" = true ] && [ "$LINT_OK" = true ] && [ "$FORMAT_OK" = true ] && [ "$TESTS_OK" = true ]; then
     ALL_CHECKS_OK=true
   else
@@ -460,18 +360,13 @@ $REPAIR_TEMPLATE
 $CHECK_ERRORS
 REPAIR_EOF
 
-      REPAIR_OUT=$(mktemp)
-      (cd "$PROJECT_DIR" && command $CLAUDE_CMD < "$REPAIR_INPUT" > "$REPAIR_OUT" 2>&1) &
-      REPAIR_PID=$!
-      spin $REPAIR_PID "Repairing (iteration $REPAIR_ITERATION)" "$REPAIR_OUT"
-      wait $REPAIR_PID 2>/dev/null || true
-
-      if [ -s "$REPAIR_OUT" ]; then
+      run_claude "$REPAIR_INPUT" "Repairing (iteration $REPAIR_ITERATION)" || true
+      if [ -n "$CLAUDE_OUTPUT" ]; then
         log "--- Repair output (iteration $REPAIR_ITERATION) ---"
-        cat "$REPAIR_OUT"
-        cat "$REPAIR_OUT" >> "$LOG_FILE"
+        echo "$CLAUDE_OUTPUT"
+        echo "$CLAUDE_OUTPUT" >> "$LOG_FILE"
       fi
-      rm -f "$REPAIR_INPUT" "$REPAIR_OUT"
+      rm -f "$REPAIR_INPUT"
 
       # Re-run checks
       run_checks
@@ -553,12 +448,11 @@ if [ "$NO_COMMIT" = false ]; then
   git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
 fi
 
-END_TIME=$(date +%s)
-ELAPSED=$(( END_TIME - START_TIME ))
+ELAPSED=$(( $(date +%s) - START_TIME ))
 
 echo ""
 log "================================================"
-log "  Audit Fix complete! ($((ELAPSED / 60))m$((ELAPSED % 60))s)"
+log "  Audit Fix complete! ($(format_elapsed $ELAPSED))"
 log "  Sections fixed: $MERGED/$SECTION_COUNT"
 [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "  Conflicts:      ${CONFLICT_SECTIONS[*]}"
 [ "$MERGED" -gt 0 ] && log "  tsc:            $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"

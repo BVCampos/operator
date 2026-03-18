@@ -11,27 +11,15 @@ VERIFY_PROMPT="$PROMPTS_DIR/audit-verify-phase.md"
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-verify"
 
-# Defaults
-MODEL=""
-EFFORT=""
-
 # Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --max)
       echo "Note: --max is ignored. audit-verify runs all sections in one parallel pass."
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
-      shift 2
-      ;;
-    --timeout)
-      CLAUDE_TIMEOUT="$2"
       shift 2
       ;;
     -h|--help)
@@ -62,19 +50,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate
-if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Error: Not inside a git repository."
-  exit 1
-fi
-
-if ! command -v claude &>/dev/null; then
-  echo "Error: claude CLI is required."
-  exit 1
-fi
-
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
-cd "$PROJECT_DIR"
+validate_env
+build_claude_cmd
 
 REPORT_FILE="$PROJECT_DIR/audit-report.md"
 VERIFIED_FILE="$PROJECT_DIR/audit-report-verified.md"
@@ -85,11 +62,10 @@ if [ ! -f "$REPORT_FILE" ]; then
   exit 1
 fi
 
-# Extract section headings from audit report (lines like "## Section Name — Audited ...")
+# Extract section headings from audit report
 SECTIONS=()
 while IFS= read -r line; do
-  section_name=$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')
-  SECTIONS+=("$section_name")
+  SECTIONS+=("$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')")
 done < <(grep "^## " "$REPORT_FILE")
 
 SECTION_COUNT=${#SECTIONS[@]}
@@ -100,11 +76,6 @@ if [ "$SECTION_COUNT" -eq 0 ]; then
 fi
 
 REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
-
-# Build claude command
-CLAUDE_CMD="claude --dangerously-skip-permissions --print"
-[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
-[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
 
 echo "================================================"
 echo "  Audit Verify — $SECTION_COUNT sections in parallel"
@@ -136,12 +107,7 @@ for i in "${!SECTIONS[@]}"; do
   section="${SECTIONS[$i]}"
   idx=$((i + 1))
 
-  # Extract this section's content from the report (from "## <section>" to next "## " or EOF)
-  SECTION_CONTENT=$(awk -v header="## $section" '
-    $0 == header || index($0, header " — ") == 1 { found=1; print; next }
-    found && /^## / { exit }
-    found { print }
-  ' "$REPORT_FILE")
+  SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
 
   # Build per-section prompt: template + section data
   cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
@@ -210,10 +176,7 @@ log "Combining verification results..."
   done
 } > "$VERIFIED_FILE"
 
-END_TIME=$(date +%s)
-ELAPSED=$(( END_TIME - START_TIME ))
-ELAPSED_MIN=$(( ELAPSED / 60 ))
-ELAPSED_SEC=$(( ELAPSED % 60 ))
+ELAPSED=$(( $(date +%s) - START_TIME ))
 
 # Final stats
 TOTAL_CONFIRMED=$(grep -ci "CONFIRMED" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_CONFIRMED=0
@@ -223,7 +186,7 @@ TOTAL_BY_DESIGN=$(grep -ci "BY_DESIGN" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_BY
 
 echo ""
 log "================================================"
-log "  Verification COMPLETE! (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+log "  Verification COMPLETE! ($(format_elapsed $ELAPSED))"
 log "  Sections verified: $SECTION_COUNT"
 log "  Confirmed:       $TOTAL_CONFIRMED"
 log "  False positives:  $TOTAL_FALSE_POS"

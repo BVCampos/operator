@@ -14,30 +14,19 @@ setup_log "review-loop"
 
 # Defaults
 MAX_ITERATIONS=3
-MODEL=""
-EFFORT=""
 NO_COMMIT=true
-
-# Parse arguments
 REVIEW_ONLY=false
 FIX_ONLY=false
 
+# Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --max)
       MAX_ITERATIONS="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
-      shift 2
-      ;;
-    --timeout)
-      CLAUDE_TIMEOUT="$2"
       shift 2
       ;;
     --commit)
@@ -82,29 +71,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate we're in a git repo
-if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Error: Not inside a git repository."
-  exit 1
-fi
-
-# Check prerequisites
-if ! command -v claude &>/dev/null; then
-  echo "Error: claude CLI is required."
-  exit 1
-fi
-
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
-cd "$PROJECT_DIR"
+validate_env
+build_claude_cmd
 
 CHANGED_FILES=$(git diff --name-only 2>/dev/null | wc -l | tr -d ' ')
 STAGED_FILES=$(git diff --cached --name-only 2>/dev/null | wc -l | tr -d ' ')
 BRANCH_DIFF=$(git diff main...HEAD --name-only 2>/dev/null | wc -l | tr -d ' ')
-
-# Build claude command
-CLAUDE_CMD="claude --dangerously-skip-permissions --print"
-[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
-[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
 
 echo "================================================"
 echo "  Review Loop — Max iterations: $MAX_ITERATIONS"
@@ -137,26 +109,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     log "--- Phase 1: REVIEW ---"
     echo ""
 
-    # Run claude in background, capture output to temp file
-    REVIEW_OUT=$(mktemp)
-    command $CLAUDE_CMD < "$REVIEW_PROMPT" > "$REVIEW_OUT" 2>&1 &
-    CLAUDE_PID=$!
-    log "Claude review started (PID: $CLAUDE_PID)"
-
-    # Show spinner while claude works
-    spin $CLAUDE_PID "Reviewing code" "$REVIEW_OUT"
-
-    # Wait for exit code
-    wait $CLAUDE_PID 2>/dev/null || true
-    OUTPUT=$(cat "$REVIEW_OUT")
-    rm -f "$REVIEW_OUT"
-
-    # If timed out, retry the iteration
-    if [ "$SPIN_TIMED_OUT" = true ]; then
+    if ! run_claude "$REVIEW_PROMPT" "Reviewing code"; then
       log "Review phase stalled (no output for ${CLAUDE_TIMEOUT}m) — retrying"
       sleep 2
       continue
     fi
+    OUTPUT="$CLAUDE_OUTPUT"
 
     # Log a preview of the output
     LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
@@ -223,26 +181,14 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     printf '\n## OVERRIDE: No Commit\n\nDo NOT run git commit. Stage all changes with `git add` but leave them uncommitted. Skip step 6 entirely.\n' >> "$FIX_INPUT"
   fi
 
-  # Run claude in background
-  FIX_OUT=$(mktemp)
-  command $CLAUDE_CMD < "$FIX_INPUT" > "$FIX_OUT" 2>&1 &
-  CLAUDE_PID=$!
-  log "Claude fix started (PID: $CLAUDE_PID)"
-
-  # Show spinner
-  spin $CLAUDE_PID "Fixing issues" "$FIX_OUT"
-
-  wait $CLAUDE_PID 2>/dev/null || true
-  OUTPUT=$(cat "$FIX_OUT")
-  rm -f "$FIX_OUT"
-  [ "$NO_COMMIT" = true ] && rm -f "$FIX_INPUT"
-
-  # If timed out, retry the iteration
-  if [ "$SPIN_TIMED_OUT" = true ]; then
+  if ! run_claude "$FIX_INPUT" "Fixing issues"; then
     log "Fix phase stalled (no output for ${CLAUDE_TIMEOUT}m) — retrying"
+    [ "$NO_COMMIT" = true ] && rm -f "$FIX_INPUT"
     sleep 2
     continue
   fi
+  OUTPUT="$CLAUDE_OUTPUT"
+  [ "$NO_COMMIT" = true ] && rm -f "$FIX_INPUT"
 
   LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
   log "Fix output: $LINES lines"

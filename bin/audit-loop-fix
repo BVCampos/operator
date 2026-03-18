@@ -5,6 +5,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
 
 # Defaults
 AUDIT_MAX=20
@@ -14,6 +15,10 @@ COMMIT_FLAG=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --commit)
       COMMIT_FLAG="--commit"
@@ -34,18 +39,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --fix-max)
       FIX_MAX="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
-      shift 2
-      ;;
-    --timeout)
-      TIMEOUT="$2"
       shift 2
       ;;
     --skip-verify)
@@ -81,6 +74,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Build common flags to forward to subscripts
+COMMON_FLAGS=""
+[ -n "$MODEL" ] && COMMON_FLAGS="$COMMON_FLAGS --model $MODEL"
+[ -n "$EFFORT" ] && COMMON_FLAGS="$COMMON_FLAGS --effort $EFFORT"
+[ "$CLAUDE_TIMEOUT" != "15" ] && COMMON_FLAGS="$COMMON_FLAGS --timeout $CLAUDE_TIMEOUT"
+
 echo "================================================"
 echo "  Audit + Verify + Fix Pipeline"
 echo "  Audit:  up to $AUDIT_MAX iterations"
@@ -93,7 +92,7 @@ echo "  Fix:    up to $FIX_MAX sections in parallel"
 [ -n "$COMMIT_FLAG" ] && echo "  Commit: enabled"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
-[ -n "$TIMEOUT" ] && echo "  Stall:   kill after ${TIMEOUT}m with no output"
+[ "$CLAUDE_TIMEOUT" != "15" ] && echo "  Stall:   kill after ${CLAUDE_TIMEOUT}m with no output"
 echo "================================================"
 echo ""
 
@@ -102,11 +101,7 @@ START_TIME=$(date +%s)
 # Phase 1: Audit
 echo "[$(date '+%H:%M:%S')] Phase 1: AUDIT"
 echo ""
-AUDIT_CMD="$SCRIPT_DIR/audit-loop --max $AUDIT_MAX"
-[ -n "$MODEL" ] && AUDIT_CMD="$AUDIT_CMD --model $MODEL"
-[ -n "$EFFORT" ] && AUDIT_CMD="$AUDIT_CMD --effort $EFFORT"
-[ -n "$TIMEOUT" ] && AUDIT_CMD="$AUDIT_CMD --timeout $TIMEOUT"
-$AUDIT_CMD && AUDIT_EXIT=0 || AUDIT_EXIT=$?
+$SCRIPT_DIR/audit-loop --max $AUDIT_MAX $COMMON_FLAGS && AUDIT_EXIT=0 || AUDIT_EXIT=$?
 
 echo ""
 echo "[$(date '+%H:%M:%S')] Audit phase finished (exit: $AUDIT_EXIT)"
@@ -127,11 +122,7 @@ fi
 if [ "$SKIP_VERIFY" = false ]; then
   echo "[$(date '+%H:%M:%S')] Phase 2: VERIFY"
   echo ""
-  VERIFY_CMD="$SCRIPT_DIR/audit-verify"
-  [ -n "$MODEL" ] && VERIFY_CMD="$VERIFY_CMD --model $MODEL"
-  [ -n "$EFFORT" ] && VERIFY_CMD="$VERIFY_CMD --effort $EFFORT"
-  [ -n "$TIMEOUT" ] && VERIFY_CMD="$VERIFY_CMD --timeout $TIMEOUT"
-  $VERIFY_CMD && VERIFY_EXIT=0 || VERIFY_EXIT=$?
+  $SCRIPT_DIR/audit-verify $COMMON_FLAGS && VERIFY_EXIT=0 || VERIFY_EXIT=$?
 
   echo ""
   echo "[$(date '+%H:%M:%S')] Verify phase finished (exit: $VERIFY_EXIT)"
@@ -141,21 +132,13 @@ fi
 # Phase 3: Fix
 echo "[$(date '+%H:%M:%S')] Phase 3: FIX"
 echo ""
-FIX_CMD="$SCRIPT_DIR/audit-fix --max $FIX_MAX"
-[ -n "$COMMIT_FLAG" ] && FIX_CMD="$FIX_CMD --commit"
-[ -n "$MODEL" ] && FIX_CMD="$FIX_CMD --model $MODEL"
-[ -n "$EFFORT" ] && FIX_CMD="$FIX_CMD --effort $EFFORT"
-[ -n "$TIMEOUT" ] && FIX_CMD="$FIX_CMD --timeout $TIMEOUT"
-$FIX_CMD && FIX_EXIT=0 || FIX_EXIT=$?
+$SCRIPT_DIR/audit-fix --max $FIX_MAX $COMMIT_FLAG $COMMON_FLAGS && FIX_EXIT=0 || FIX_EXIT=$?
 
-END_TIME=$(date +%s)
-ELAPSED=$(( END_TIME - START_TIME ))
-ELAPSED_MIN=$(( ELAPSED / 60 ))
-ELAPSED_SEC=$(( ELAPSED % 60 ))
+ELAPSED=$(( $(date +%s) - START_TIME ))
 
 echo ""
 echo "================================================"
-echo "  [$(date '+%H:%M:%S')] Pipeline complete (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+echo "  [$(date '+%H:%M:%S')] Pipeline complete ($(format_elapsed $ELAPSED))"
 echo "  Reports:"
 echo "    audit-report.md            Findings"
 if [ "$SKIP_VERIFY" = false ]; then

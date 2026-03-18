@@ -13,26 +13,16 @@ setup_log "audit-loop"
 
 # Defaults
 MAX_ITERATIONS=20
-MODEL=""
-EFFORT=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --max)
       MAX_ITERATIONS="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
-      shift 2
-      ;;
-    --timeout)
-      CLAUDE_TIMEOUT="$2"
       shift 2
       ;;
     -h|--help)
@@ -66,19 +56,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Validate we're in a git repo
-if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Error: Not inside a git repository."
-  exit 1
-fi
-
-if ! command -v claude &>/dev/null; then
-  echo "Error: claude CLI is required."
-  exit 1
-fi
-
-PROJECT_DIR="$(git rev-parse --show-toplevel)"
-cd "$PROJECT_DIR"
+validate_env
+build_claude_cmd
 
 PROGRESS_FILE="$PROJECT_DIR/audit-progress.md"
 REPORT_FILE="$PROJECT_DIR/audit-report.md"
@@ -94,11 +73,6 @@ if [ -f "$PROGRESS_FILE" ]; then
 else
   PROGRESS_INFO="Fresh audit (no progress file)"
 fi
-
-# Build claude command
-CLAUDE_CMD="claude --dangerously-skip-permissions --print"
-[ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
-[ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
 
 echo "================================================"
 echo "  Audit Loop — Max iterations: $MAX_ITERATIONS"
@@ -132,24 +106,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     log "Progress: $COVERED sections done, $REMAINING remaining"
   fi
 
-  # Run audit
-  AUDIT_OUT=$(mktemp)
-  command $CLAUDE_CMD < "$AUDIT_PROMPT" > "$AUDIT_OUT" 2>&1 &
-  CLAUDE_PID=$!
-  log "Claude audit started (PID: $CLAUDE_PID)"
-
-  spin $CLAUDE_PID "Auditing codebase" "$AUDIT_OUT"
-
-  wait $CLAUDE_PID 2>/dev/null || true
-  OUTPUT=$(cat "$AUDIT_OUT")
-  rm -f "$AUDIT_OUT"
-
-  # If timed out, skip this iteration and retry
-  if [ "$SPIN_TIMED_OUT" = true ]; then
+  if ! run_claude "$AUDIT_PROMPT" "Auditing codebase"; then
     log "Iteration $i stalled (no output for ${CLAUDE_TIMEOUT}m) — retrying"
     sleep 2
     continue
   fi
+  OUTPUT="$CLAUDE_OUTPUT"
 
   LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
   log "Audit output: $LINES lines"
@@ -161,20 +123,15 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Check for completion
   if echo "$OUTPUT" | grep -q "<audit>COMPLETE</audit>"; then
-    END_TIME=$(date +%s)
-    ELAPSED=$(( END_TIME - START_TIME ))
-    ELAPSED_MIN=$(( ELAPSED / 60 ))
-    ELAPSED_SEC=$(( ELAPSED % 60 ))
+    ELAPSED=$(( $(date +%s) - START_TIME ))
 
     echo ""
     log "================================================"
     log "  Audit COMPLETE!"
-    log "  All sections audited in $i iterations (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+    log "  All sections audited in $i iterations ($(format_elapsed $ELAPSED))"
     log "================================================"
 
     if [ -f "$REPORT_FILE" ]; then
-      CRITICAL=$(grep -ci "critical" "$REPORT_FILE" 2>/dev/null) || CRITICAL=0
-      IMPORTANT=$(grep -ci "important" "$REPORT_FILE" 2>/dev/null) || IMPORTANT=0
       log "Report: $REPORT_FILE"
       log "Progress: $PROGRESS_FILE"
     fi
@@ -200,15 +157,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   sleep 2
 done
 
-END_TIME=$(date +%s)
-ELAPSED=$(( END_TIME - START_TIME ))
-ELAPSED_MIN=$(( ELAPSED / 60 ))
-ELAPSED_SEC=$(( ELAPSED % 60 ))
+ELAPSED=$(( $(date +%s) - START_TIME ))
 
 echo ""
 log "================================================"
 log "  Reached max iterations ($MAX_ITERATIONS)."
-log "  Total time: ${ELAPSED_MIN}m${ELAPSED_SEC}s"
+log "  Total time: $(format_elapsed $ELAPSED)"
 if [ -f "$PROGRESS_FILE" ]; then
   COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
   REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0

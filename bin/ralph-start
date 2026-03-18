@@ -26,12 +26,14 @@ PRD_FILE=""
 TOOL="claude"
 MAX_ITERATIONS=10
 NAME=""
-MODEL=""
-EFFORT=""
 PROJECT_DIR="$PWD"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
   case $1 in
     --prd)
       PRD_FILE="$(realpath "$2")"
@@ -47,14 +49,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       NAME="$2"
-      shift 2
-      ;;
-    --model)
-      MODEL="$2"
-      shift 2
-      ;;
-    --effort)
-      EFFORT="$2"
       shift 2
       ;;
     -h|--help)
@@ -120,7 +114,7 @@ if [ -z "$NAME" ]; then
 fi
 
 # Sanitize name for use in branch/tmux session names
-NAME="$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
+NAME="$(sanitize_name "$NAME")"
 
 WORKTREE_DIR="$PROJECT_DIR/.ralph-worktrees/$NAME"
 BRANCH_NAME="ralph/$NAME"
