@@ -19,12 +19,12 @@ find . -name "schema.ts" -o -name "schema.prisma" -o -name "*.sql" -o -name "mig
 
 ### 2. Check audit progress
 
-Read `./audit-progress.md` if it exists. This file tracks:
+Read `./audit-progress.md`. This file was created by the planning phase and tracks:
 - Which sections of the codebase have been audited
 - Which sections remain
-- The codebase map
+- The codebase map with key files per section
 
-If the file does NOT exist, this is the first iteration. Create it by:
+If the file does NOT exist (fallback — planning phase was skipped), create it by:
 1. Mapping the codebase into logical sections (e.g., "auth & middleware", "DB schema & queries", "API routes /dashboard/*", "components/shared", etc.)
 2. Each section should be a cohesive module that can be audited in one pass
 3. Mark all sections as `[ ] Not audited`

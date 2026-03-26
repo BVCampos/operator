@@ -53,6 +53,7 @@ build_claude_cmd() {
   CLAUDE_CMD="claude --dangerously-skip-permissions --print"
   [ -n "$MODEL" ] && CLAUDE_CMD="$CLAUDE_CMD --model $MODEL"
   [ -n "$EFFORT" ] && CLAUDE_CMD="$CLAUDE_CMD --effort $EFFORT"
+  return 0
 }
 
 # ── Run claude with spinner ───────────────────────────────────────────

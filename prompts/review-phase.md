@@ -32,6 +32,11 @@ You are an expert code reviewer. Review all uncommitted changes in this reposito
    - **Test gaps (X):** brief list or "none"
    - **Suggestions (X):** brief list or "none"
 
+   ### Metrics
+   - Total findings: N
+   - Avg confidence: N%
+   - Files with issues: N
+
    ---
    ```
 

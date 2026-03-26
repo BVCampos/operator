@@ -8,6 +8,7 @@ OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 FIX_PROMPT="$PROMPTS_DIR/audit-fix-phase.md"
 REPAIR_PROMPT="$PROMPTS_DIR/audit-fix-repair-phase.md"
+CONTRACT_PROMPT="$PROMPTS_DIR/audit-fix-contract-phase.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-fix"
@@ -17,6 +18,7 @@ MAX_SECTIONS=0  # 0 = all unfixed
 MAX_REPAIRS=3
 NO_COMMIT=true
 NO_REPAIR=false
+SKIP_CONTRACTS=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-repair)
       NO_REPAIR=true
+      shift
+      ;;
+    --skip-contracts)
+      SKIP_CONTRACTS=true
       shift
       ;;
     --max-repairs)
@@ -55,6 +61,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo "  --no-repair      Skip the auto-repair phase if checks fail"
       echo "  --max-repairs N  Max repair iterations (default: 3)"
+      echo "  --skip-contracts Skip the sprint contract generation phase"
       exit 0
       ;;
     *)
@@ -135,6 +142,8 @@ echo "  Audit Fix — $SECTION_COUNT sections in parallel"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
 echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+[ "$SKIP_CONTRACTS" = false ] && echo "  Contracts: enabled (sprint contracts before fixing)"
+[ "$SKIP_CONTRACTS" = true ] && echo "  Contracts: disabled"
 [ "$NO_REPAIR" = true ] && echo "  Repair:   disabled"
 [ "$NO_COMMIT" = false ] && echo "  Commit:   enabled"
 echo "  Project:  $PROJECT_DIR"
@@ -145,6 +154,35 @@ echo "================================================"
 echo ""
 log "Started audit-fix — $SECTION_COUNT sections in parallel"
 log "Base commit: $BASE_COMMIT"
+
+# ── Generate sprint contracts ─────────────────────────────────────────
+
+CONTRACT_FILE="$PROJECT_DIR/audit-fix-contracts.md"
+CONTRACTS_CONTENT=""
+
+if [ "$SKIP_CONTRACTS" = false ] && [ -f "$CONTRACT_PROMPT" ]; then
+  echo ""
+  log "Generating sprint contracts (defining 'done' before fixing)..."
+
+  CONTRACT_INPUT=$(mktemp)
+  cat "$CONTRACT_PROMPT" > "$CONTRACT_INPUT"
+  printf '\n---\n\n## Audit Report\n\n' >> "$CONTRACT_INPUT"
+  cat "$REPORT_FILE" >> "$CONTRACT_INPUT"
+
+  if run_claude "$CONTRACT_INPUT" "Generating verification contracts"; then
+    CONTRACTS_CONTENT="$CLAUDE_OUTPUT"
+    echo "$CONTRACTS_CONTENT" > "$CONTRACT_FILE"
+    log "Contracts written to audit-fix-contracts.md"
+
+    # Count contracts generated
+    CONTRACT_COUNT=$(echo "$CONTRACTS_CONTENT" | grep -c "^### " 2>/dev/null) || CONTRACT_COUNT=0
+    log "Generated $CONTRACT_COUNT verification contracts"
+  else
+    log "Contract generation stalled — proceeding without contracts"
+  fi
+  rm -f "$CONTRACT_INPUT"
+  echo ""
+fi
 
 # ── Set up worktrees and launch fixers ──────────────────────────────
 
@@ -195,6 +233,17 @@ for i in "${!SECTIONS[@]}"; do
 
   SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
 
+  # Extract contract for this section (if contracts were generated)
+  SECTION_CONTRACT=""
+  if [ -n "$CONTRACTS_CONTENT" ]; then
+    # Extract contract content between this section's heading and the next ## heading
+    SECTION_CONTRACT=$(echo "$CONTRACTS_CONTENT" | awk -v section="$section" '
+      tolower($0) ~ tolower(section) { found=1; print; next }
+      found && /^## / { exit }
+      found { print }
+    ')
+  fi
+
   # Build per-section prompt
   cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
 $FIX_TEMPLATE
@@ -209,6 +258,18 @@ $FIX_TEMPLATE
 
 $SECTION_CONTENT
 PROMPT_EOF
+
+  # Append contract if available
+  if [ -n "$SECTION_CONTRACT" ]; then
+    cat >> "$WORK_DIR/prompt-$idx.md" <<CONTRACT_EOF
+
+### Verification Contract
+
+The following contract defines what "fixed" means for each finding. Your fixes MUST satisfy these conditions. After fixing, verify each DONE-when condition and run each VERIFY-by command.
+
+$SECTION_CONTRACT
+CONTRACT_EOF
+  fi
 
   # Launch Claude in the worktree
   (cd "$wt" && command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1) &
@@ -438,12 +499,26 @@ fi
   echo "- tests: $([ "$TESTS_OK" = true ] && echo "passing" || echo "failures")"
   [ "$REPAIR_ITERATION" -gt 0 ] && echo "- repair: $REPAIR_ITERATION iteration(s), $([ "$ALL_CHECKS_OK" = true ] && echo "fixed" || echo "still failing")"
   echo ""
+
+  echo "### Metrics"
+  echo "- Sections attempted: $SECTION_COUNT"
+  echo "- Sections merged: $MERGED/$SECTION_COUNT ($(( MERGED * 100 / (SECTION_COUNT > 0 ? SECTION_COUNT : 1) ))%)"
+  echo "- Conflicts: ${#CONFLICT_SECTIONS[@]}"
+  echo "- Repair iterations needed: $REPAIR_ITERATION"
+  echo "- Fix compilation success: $([ "$TSC_OK" = true ] && echo "yes" || echo "no")"
+  echo "- All checks passing: $([ "$ALL_CHECKS_OK" = true ] && echo "yes" || echo "no")"
+  [ -n "$CONTRACTS_CONTENT" ] && echo "- Sprint contracts: yes ($CONTRACT_COUNT generated)"
+  [ -z "$CONTRACTS_CONTENT" ] && echo "- Sprint contracts: skipped"
+  ELAPSED_SO_FAR=$(( $(date +%s) - START_TIME ))
+  echo "- Total time: $(format_elapsed $ELAPSED_SO_FAR)"
+  echo ""
   echo "---"
   echo ""
 } >> "$CHANGELOG_FILE"
 
 # Commit progress + changelog (only if --commit)
 git add "$PROGRESS_FILE" "$CHANGELOG_FILE" 2>/dev/null || true
+[ -f "$CONTRACT_FILE" ] && git add "$CONTRACT_FILE" 2>/dev/null || true
 if [ "$NO_COMMIT" = false ]; then
   git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
 fi

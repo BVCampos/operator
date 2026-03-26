@@ -8,6 +8,7 @@ OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 REVIEW_PROMPT="$PROMPTS_DIR/review-phase.md"
 FIX_PROMPT="$PROMPTS_DIR/fix-phase.md"
+VERIFY_PROMPT="$PROMPTS_DIR/review-verify-phase.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "review-loop"
@@ -17,6 +18,8 @@ MAX_ITERATIONS=3
 NO_COMMIT=true
 REVIEW_ONLY=false
 FIX_ONLY=false
+SKIP_VERIFY=false
+VERIFY_THRESHOLD=7
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -41,21 +44,32 @@ while [[ $# -gt 0 ]]; do
       FIX_ONLY=true
       shift
       ;;
+    --skip-verify)
+      SKIP_VERIFY=true
+      shift
+      ;;
+    --verify-threshold)
+      VERIFY_THRESHOLD="$2"
+      shift 2
+      ;;
     -h|--help)
-      echo "Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--review-only] [--fix-only]"
+      echo "Usage: review-loop [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--review-only] [--fix-only] [--skip-verify]"
       echo ""
-      echo "Runs a review → fix loop on the current branch's changes."
+      echo "Runs a review → fix → verify loop on the current branch's changes."
+      echo "The verify phase independently evaluates fixes with a scoring rubric."
       echo ""
       echo "Options:"
-      echo "  --max N          Max iterations (default: 3)"
-      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
-      echo "  --effort LEVEL   Thinking effort: low, medium, high, max (default: Claude's default)"
-      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
-      echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
-      echo "  --review-only    Only run the review phase (no fixes)"
-      echo "  --fix-only       Only run the fix phase (assumes review-report.md exists)"
+      echo "  --max N               Max iterations (default: 3)"
+      echo "  --model MODEL         Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL        Thinking effort: low, medium, high, max (default: Claude's default)"
+      echo "  --timeout MIN         Kill claude after MIN minutes with no output (default: 15)"
+      echo "  --commit              Commit fixes automatically (default: no commit, changes left staged)"
+      echo "  --review-only         Only run the review phase (no fixes)"
+      echo "  --fix-only            Only run the fix phase (assumes review-report.md exists)"
+      echo "  --skip-verify         Skip the independent verification phase"
+      echo "  --verify-threshold N  Minimum score to pass verification (default: 7)"
       echo ""
-      echo "The loop stops early if the review finds no critical/important issues."
+      echo "The loop stops early when verification scores all fixes >= threshold."
       exit 0
       ;;
     *)
@@ -85,6 +99,11 @@ echo "  Branch:  $(git branch --show-current)"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
 [ "$NO_COMMIT" = false ] && echo "  Commit:  enabled"
+if [ "$SKIP_VERIFY" = false ]; then
+  echo "  Verify:  enabled (threshold: $VERIFY_THRESHOLD/10)"
+else
+  echo "  Verify:  disabled"
+fi
 echo "  Stall:   kill after ${CLAUDE_TIMEOUT}m with no output"
 echo "  Log:     $LOG_FILE"
 echo "  Changed: $CHANGED_FILES unstaged, $STAGED_FILES staged, $BRANCH_DIFF vs main"
@@ -208,6 +227,58 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   COMMITTED=$(git log --oneline -1 2>/dev/null)
   log "Latest commit: $COMMITTED"
 
+  # Phase 3: Verify (independent evaluator)
+  if [ "$SKIP_VERIFY" = false ] && [ -f "$PROJECT_DIR/review-report.md" ]; then
+    echo ""
+    log "--- Phase 3: VERIFY (independent evaluator) ---"
+    echo ""
+
+    if ! run_claude "$VERIFY_PROMPT" "Verifying fixes"; then
+      log "Verify phase stalled (no output for ${CLAUDE_TIMEOUT}m) — skipping verification"
+    else
+      OUTPUT="$CLAUDE_OUTPUT"
+
+      LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+      log "Verify output: $LINES lines"
+
+      echo ""
+      echo "$OUTPUT"
+      echo "$OUTPUT" >> "$LOG_FILE"
+
+      # Parse overall score from output
+      OVERALL_SCORE=$(echo "$OUTPUT" | grep -oP 'Overall score: \K[0-9]+\.?[0-9]*' | head -1)
+      if [ -z "$OVERALL_SCORE" ]; then
+        OVERALL_SCORE=$(echo "$OUTPUT" | grep -oP 'Overall: \K[0-9]+\.?[0-9]*' | head -1)
+      fi
+
+      if [ -n "$OVERALL_SCORE" ]; then
+        log "Verification score: $OVERALL_SCORE/10 (threshold: $VERIFY_THRESHOLD)"
+      fi
+
+      # Check for pass signal
+      if echo "$OUTPUT" | grep -q "<verify>PASS</verify>"; then
+        echo ""
+        log "================================================"
+        log "  Verification PASSED! Score: ${OVERALL_SCORE:-N/A}/10"
+        log "  All fixes verified by independent evaluator."
+        log "  Completed at iteration $i of $MAX_ITERATIONS"
+        log "================================================"
+        if [ -f "$CHANGELOG" ]; then
+          ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null) || ITER_COUNT=0
+          log "Changelog: $CHANGELOG ($ITER_COUNT entries)"
+        fi
+        exit 0
+      else
+        log "Verification: NEEDS_WORK (score: ${OVERALL_SCORE:-N/A}/10) — continuing to next iteration"
+        # Parse fail/unfixed counts for logging
+        FAIL_COUNT=$(echo "$OUTPUT" | grep -oP 'FAIL[^:]*: \K[0-9]+' | head -1)
+        UNFIXED_COUNT=$(echo "$OUTPUT" | grep -oP 'UNFIXED: \K[0-9]+' | head -1)
+        [ -n "$FAIL_COUNT" ] && [ "$FAIL_COUNT" -gt 0 ] && log "  Failed fixes: $FAIL_COUNT"
+        [ -n "$UNFIXED_COUNT" ] && [ "$UNFIXED_COUNT" -gt 0 ] && log "  Unfixed findings: $UNFIXED_COUNT"
+      fi
+    fi
+  fi
+
   # Reset fix-only flag after first iteration
   FIX_ONLY=false
 
@@ -220,6 +291,7 @@ echo ""
 log "================================================"
 log "  Reached max iterations ($MAX_ITERATIONS)."
 log "  Check review-report.md for remaining issues."
+[ -f "$PROJECT_DIR/review-verify.md" ] && log "  Verification: review-verify.md"
 log "  Full log: $LOG_FILE"
 if [ -f "$CHANGELOG" ]; then
   ITER_COUNT=$(grep -c "^## Iteration" "$CHANGELOG" 2>/dev/null) || ITER_COUNT=0

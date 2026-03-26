@@ -7,6 +7,7 @@ set -e
 OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
 AUDIT_PROMPT="$PROMPTS_DIR/audit-phase.md"
+PLAN_PROMPT="$PROMPTS_DIR/audit-plan-phase.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 setup_log "audit-loop"
@@ -91,6 +92,35 @@ log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
 log "Total files: $TOTAL_FILES | $PROGRESS_INFO"
 
 START_TIME=$(date +%s)
+
+# ── Plan phase: map codebase into sections ────────────────────────
+if [ ! -f "$PROGRESS_FILE" ] && [ -f "$PLAN_PROMPT" ]; then
+  echo "==============================================================="
+  echo "  Plan Phase — Mapping codebase into sections"
+  echo "==============================================================="
+  echo ""
+
+  if run_claude "$PLAN_PROMPT" "Planning audit sections"; then
+    OUTPUT="$CLAUDE_OUTPUT"
+    LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+    log "Plan output: $LINES lines"
+    echo ""
+    echo "$OUTPUT"
+    echo "$OUTPUT" >> "$LOG_FILE"
+
+    if [ -f "$PROGRESS_FILE" ]; then
+      COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+      REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+      log "Plan created: $REMAINING sections to audit"
+    else
+      log "Warning: Plan phase did not create audit-progress.md — audit phase will create it"
+    fi
+  else
+    log "Plan phase stalled — audit phase will create sections inline"
+  fi
+
+  echo ""
+fi
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   echo ""

@@ -144,5 +144,6 @@ echo "    audit-report.md            Findings"
 if [ "$SKIP_VERIFY" = false ]; then
   echo "    audit-report-verified.md   Verified findings"
 fi
+echo "    audit-fix-contracts.md     Verification contracts"
 echo "    audit-fix-changelog.md     Fixes applied"
 echo "================================================"

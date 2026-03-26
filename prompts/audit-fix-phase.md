@@ -17,7 +17,17 @@ If the findings have verdicts (from verification):
 - Only fix **CONFIRMED** and **WRONG_SEVERITY** findings
 - Skip FALSE_POSITIVE, DUPLICATE, and BY_DESIGN findings
 
-### 2. Verify changes
+### 2. Check against verification contract
+
+If a **Verification Contract** section is provided below the findings, verify each fix against its contract:
+- For each finding, check every **DONE when** condition is satisfied
+- Run each **VERIFY by** command and confirm the expected result
+- Check each **REGRESSION check** still passes
+- If a condition is NOT met, fix the code until it is
+
+If no contract is provided, skip this step.
+
+### 3. Verify changes
 
 After fixing ALL issues, run these checks **on the files you changed** and fix any errors they surface. Repeat until all pass.
 
@@ -50,7 +60,7 @@ Use the project's test runner (`vitest`, `jest`, etc.). If no related tests exis
 
 Fix any errors from these checks before committing. **Do NOT run the full test suite** — the full suite will run once after all sections are merged.
 
-### 3. Commit
+### 4. Commit
 
 Stage all changed source files and commit:
 ```
@@ -62,12 +72,13 @@ fix(audit): [section name] — fix N issues
 
 Do NOT commit progress files, changelog files, or audit reports — only commit code changes.
 
-### 4. Output
+### 5. Output
 
 Output a brief summary:
 - Section name
 - Issues fixed (count by severity)
 - Issues skipped (count and reasons)
+- Contract status (if contract was provided): N/N conditions met
 - Files modified
 - tsc status
 
