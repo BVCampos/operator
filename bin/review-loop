@@ -245,10 +245,10 @@ for i in $(seq 1 $MAX_ITERATIONS); do
       echo "$OUTPUT"
       echo "$OUTPUT" >> "$LOG_FILE"
 
-      # Parse overall score from output
-      OVERALL_SCORE=$(echo "$OUTPUT" | grep -oP 'Overall score: \K[0-9]+\.?[0-9]*' | head -1)
+      # Parse overall score from output (macOS-compatible, no grep -P)
+      OVERALL_SCORE=$(echo "$OUTPUT" | sed -n 's/.*Overall score: *\([0-9][0-9]*\.*[0-9]*\).*/\1/p' | head -1)
       if [ -z "$OVERALL_SCORE" ]; then
-        OVERALL_SCORE=$(echo "$OUTPUT" | grep -oP 'Overall: \K[0-9]+\.?[0-9]*' | head -1)
+        OVERALL_SCORE=$(echo "$OUTPUT" | sed -n 's/.*Overall: *\([0-9][0-9]*\.*[0-9]*\).*/\1/p' | head -1)
       fi
 
       if [ -n "$OVERALL_SCORE" ]; then
@@ -270,9 +270,9 @@ for i in $(seq 1 $MAX_ITERATIONS); do
         exit 0
       else
         log "Verification: NEEDS_WORK (score: ${OVERALL_SCORE:-N/A}/10) — continuing to next iteration"
-        # Parse fail/unfixed counts for logging
-        FAIL_COUNT=$(echo "$OUTPUT" | grep -oP 'FAIL[^:]*: \K[0-9]+' | head -1)
-        UNFIXED_COUNT=$(echo "$OUTPUT" | grep -oP 'UNFIXED: \K[0-9]+' | head -1)
+        # Parse fail/unfixed counts for logging (macOS-compatible)
+        FAIL_COUNT=$(echo "$OUTPUT" | sed -n 's/.*FAIL[^:]*: *\([0-9][0-9]*\).*/\1/p' | head -1)
+        UNFIXED_COUNT=$(echo "$OUTPUT" | sed -n 's/.*UNFIXED: *\([0-9][0-9]*\).*/\1/p' | head -1)
         [ -n "$FAIL_COUNT" ] && [ "$FAIL_COUNT" -gt 0 ] && log "  Failed fixes: $FAIL_COUNT"
         [ -n "$UNFIXED_COUNT" ] && [ "$UNFIXED_COUNT" -gt 0 ] && log "  Unfixed findings: $UNFIXED_COUNT"
       fi
