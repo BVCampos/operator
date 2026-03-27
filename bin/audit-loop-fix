@@ -11,6 +11,7 @@ source "$SCRIPT_DIR/lib.sh"
 AUDIT_MAX=20
 FIX_MAX=20
 SKIP_VERIFY=false
+SKIP_CONTRACTS=false
 COMMIT_FLAG=""
 
 # Parse arguments
@@ -45,8 +46,12 @@ while [[ $# -gt 0 ]]; do
       SKIP_VERIFY=true
       shift
       ;;
+    --skip-contracts)
+      SKIP_CONTRACTS=true
+      shift
+      ;;
     -h|--help)
-      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-verify]"
+      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-verify] [--skip-contracts]"
       echo ""
       echo "Runs audit-loop → audit-verify → audit-fix in sequence."
       echo ""
@@ -59,6 +64,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
       echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo "  --skip-verify    Skip the verification step"
+      echo "  --skip-contracts Skip sprint contract generation before fixing"
       exit 0
       ;;
     *)
@@ -89,6 +95,11 @@ else
   echo "  Verify: skipped"
 fi
 echo "  Fix:    up to $FIX_MAX sections in parallel"
+if [ "$SKIP_CONTRACTS" = false ]; then
+  echo "  Contracts: enabled"
+else
+  echo "  Contracts: skipped"
+fi
 [ -n "$COMMIT_FLAG" ] && echo "  Commit: enabled"
 [ -n "$MODEL" ] && echo "  Model:   $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:  $EFFORT"
@@ -132,7 +143,9 @@ fi
 # Phase 3: Fix
 echo "[$(date '+%H:%M:%S')] Phase 3: FIX"
 echo ""
-$SCRIPT_DIR/audit-fix --max $FIX_MAX $COMMIT_FLAG $COMMON_FLAGS && FIX_EXIT=0 || FIX_EXIT=$?
+CONTRACT_FLAG=""
+[ "$SKIP_CONTRACTS" = true ] && CONTRACT_FLAG="--skip-contracts"
+$SCRIPT_DIR/audit-fix --max $FIX_MAX $COMMIT_FLAG $CONTRACT_FLAG $COMMON_FLAGS && FIX_EXIT=0 || FIX_EXIT=$?
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
 

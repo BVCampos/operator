@@ -159,6 +159,76 @@ _stall_detected() {
   return 1
 }
 
+# ── Activity tracking ────────────────────────────────────────────────
+
+_spin_last_output_bytes=0
+_spin_activity=""
+_spin_marker=""
+
+_init_spin_activity() {
+  _spin_last_output_bytes=0
+  _spin_activity=""
+  _spin_marker=$(mktemp)
+}
+
+_cleanup_spin_activity() {
+  rm -f "$_spin_marker" 2>/dev/null
+}
+
+# Update _spin_activity with latest status signal.
+# Checks output file for new text, then filesystem for recently edited files.
+_update_spin_activity() {
+  local outfile=${1:-}
+
+  # Priority 1: New text in output file
+  if [ -n "$outfile" ]; then
+    local bytes
+    bytes=$(wc -c < "$outfile" 2>/dev/null | tr -d ' ')
+    if (( bytes > _spin_last_output_bytes )); then
+      _spin_last_output_bytes=$bytes
+      local line
+      line=$(tail -5 "$outfile" 2>/dev/null \
+        | grep -v '^[[:space:]]*$' | grep -v '^```' | grep -v '^[#|>]' \
+        | tail -1 | sed 's/^[*_ -]*//' | cut -c1-60)
+      if [ -n "$line" ]; then
+        _spin_activity="$line"
+        return
+      fi
+    fi
+  fi
+
+  # Priority 2: Recently edited source files
+  if [ -n "$_spin_marker" ] && [ -f "$_spin_marker" ]; then
+    local recent
+    recent=$(find . -maxdepth 5 \
+      \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
+         -o -name '*.py' -o -name '*.sh' -o -name '*.md' \) \
+      -newer "$_spin_marker" \
+      ! -path '*/node_modules/*' ! -path '*/.git/*' \
+      ! -path '*/dist/*' ! -path '*/.next/*' \
+      2>/dev/null | head -1)
+    if [ -n "$recent" ]; then
+      touch "$_spin_marker"
+      _spin_activity="editing ${recent#./}"
+    fi
+  fi
+}
+
+# Activity check for spin_all — watches multiple output files in a work dir
+_update_spin_activity_multi() {
+  local work_dir=$1
+  local combined_bytes
+  combined_bytes=$(cat "$work_dir"/output-*.md 2>/dev/null | wc -c | tr -d ' ')
+  if (( combined_bytes > _spin_last_output_bytes )); then
+    _spin_last_output_bytes=$combined_bytes
+    local line
+    line=$(cat "$work_dir"/output-*.md 2>/dev/null \
+      | grep -v '^[[:space:]]*$' | grep -v '^```' | grep -v '^[#|>]' \
+      | tail -1 | sed 's/^[*_ -]*//' | cut -c1-60)
+    [ -n "$line" ] && _spin_activity="$line"
+  fi
+}
+
 # ── Spinner — single process ─────────────────────────────────────────
 
 spin() {
@@ -168,11 +238,13 @@ spin() {
   local stall_secs=$(( CLAUDE_TIMEOUT * 60 ))
   SPIN_TIMED_OUT=false
   _stall_reset
+  _init_spin_activity
   local check_counter=0
 
   # Non-TTY fallback (log files, pipes)
   if [ ! -t 1 ]; then
     echo "  $label..."
+    local last_logged_activity=""
     while kill -0 "$pid" 2>/dev/null; do
       if [ -n "$outfile" ]; then
         check_counter=$((check_counter + 1))
@@ -180,13 +252,22 @@ spin() {
           if _stall_detected "$(wc -c < "$outfile" 2>/dev/null || echo 0)" "$stall_secs"; then
             kill "$pid" 2>/dev/null || true
             echo "  ✗ $label no output for ${CLAUDE_TIMEOUT}m — process killed"
+            _cleanup_spin_activity
             return
+          fi
+        fi
+        if (( check_counter % 30 == 0 )); then
+          _update_spin_activity "$outfile"
+          if [ -n "$_spin_activity" ] && [ "$_spin_activity" != "$last_logged_activity" ]; then
+            echo "    >> $_spin_activity"
+            last_logged_activity="$_spin_activity"
           fi
         fi
       fi
       sleep 1
     done
     echo "  ✓ $label completed"
+    _cleanup_spin_activity
     return
   fi
 
@@ -201,16 +282,24 @@ spin() {
         if _stall_detected "$(wc -c < "$outfile" 2>/dev/null || echo 0)" "$stall_secs"; then
           kill "$pid" 2>/dev/null || true
           printf "\033[2K\r  ✗ %s no output for %dm — process killed\n" "$label" "$CLAUDE_TIMEOUT"
+          _cleanup_spin_activity
           return
         fi
+        _update_spin_activity "$outfile"
       fi
     fi
     local elapsed=$(( SECONDS - start ))
-    printf "\033[2K\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    if [ -n "$_spin_activity" ]; then
+      printf "\033[2K\r  %s %s (%dm%02ds) \033[2m>> %s\033[22m" \
+        "${chars:i++%${#chars}:1}" "$label" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))" "$_spin_activity"
+    else
+      printf "\033[2K\r  %s %s (%dm%02ds)" "${chars:i++%${#chars}:1}" "$label" "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    fi
     sleep 0.1
   done
   local total=$(( SECONDS - start ))
   printf "\033[2K\r  ✓ %s completed (%dm%02ds)\n" "$label" "$(( total / 60 ))" "$(( total % 60 ))"
+  _cleanup_spin_activity
 }
 
 # ── Spinner — multiple parallel processes ─────────────────────────────
@@ -222,11 +311,13 @@ spin_all() {
   local stall_secs=$(( CLAUDE_TIMEOUT * 60 ))
   SPIN_TIMED_OUT=false
   _stall_reset
+  _init_spin_activity
   local check_counter=0
 
   # Non-TTY fallback
   if [ ! -t 1 ]; then
     echo "  $label — $# sections..."
+    local last_logged_activity=""
     while true; do
       local running=0
       for pid in "$@"; do
@@ -238,12 +329,21 @@ spin_all() {
         if _stall_detected "$(cat "$work_dir"/output-*.md 2>/dev/null | wc -c || echo 0)" "$stall_secs"; then
           for pid in "$@"; do kill "$pid" 2>/dev/null || true; done
           echo "  ✗ $label no output for ${CLAUDE_TIMEOUT}m — killed $running remaining"
+          _cleanup_spin_activity
           return
+        fi
+      fi
+      if (( check_counter % 30 == 0 )); then
+        _update_spin_activity_multi "$work_dir"
+        if [ -n "$_spin_activity" ] && [ "$_spin_activity" != "$last_logged_activity" ]; then
+          echo "    >> $_spin_activity"
+          last_logged_activity="$_spin_activity"
         fi
       fi
       sleep 1
     done
     echo "  ✓ $label complete"
+    _cleanup_spin_activity
     return
   fi
 
@@ -267,18 +367,27 @@ spin_all() {
         local done_count=$(( total - running ))
         printf "\033[2K\r  ✗ %s no output for %dm — %d/%d complete, killed %d remaining\n" \
           "$label" "$CLAUDE_TIMEOUT" "$done_count" "$total" "$running"
+        _cleanup_spin_activity
         return
       fi
+      _update_spin_activity_multi "$work_dir"
     fi
 
     local elapsed=$(( SECONDS - start ))
     local done_count=$(( total - running ))
-    printf "\033[2K\r  %s %s — %d/%d sections complete (%dm%02ds)" \
-      "${chars:i++%${#chars}:1}" "$label" "$done_count" "$total" \
-      "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    if [ -n "$_spin_activity" ]; then
+      printf "\033[2K\r  %s %s — %d/%d sections (%dm%02ds) \033[2m>> %s\033[22m" \
+        "${chars:i++%${#chars}:1}" "$label" "$done_count" "$total" \
+        "$(( elapsed / 60 ))" "$(( elapsed % 60 ))" "$_spin_activity"
+    else
+      printf "\033[2K\r  %s %s — %d/%d sections complete (%dm%02ds)" \
+        "${chars:i++%${#chars}:1}" "$label" "$done_count" "$total" \
+        "$(( elapsed / 60 ))" "$(( elapsed % 60 ))"
+    fi
     sleep 0.1
   done
 
   local t=$(( SECONDS - start ))
   printf "\033[2K\r  ✓ All %d sections — %s (%dm%02ds)\n" "$total" "$label" "$(( t / 60 ))" "$(( t % 60 ))"
+  _cleanup_spin_activity
 }
