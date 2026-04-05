@@ -1,20 +1,20 @@
 #!/bin/bash
-# audit-fix — Fix audit findings (sequential by default, parallel with --parallel)
-# Usage: audit-fix [--max N] [--parallel [N]] [--model MODEL] [--effort LEVEL]
+# enhance-fix — Implement enhancement suggestions (sequential by default, parallel with --parallel)
+# Usage: enhance-fix [--max N] [--parallel [N]] [--model MODEL] [--effort LEVEL]
 
 set -e
 
 OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPTS_DIR="$OPERATOR_DIR/prompts"
-FIX_PROMPT="$PROMPTS_DIR/audit-fix-phase.md"
-REPAIR_PROMPT="$PROMPTS_DIR/audit-fix-repair-phase.md"
-CONTRACT_PROMPT="$PROMPTS_DIR/audit-fix-contract-phase.md"
+FIX_PROMPT="$PROMPTS_DIR/enhance-fix-phase.md"
+REPAIR_PROMPT="$PROMPTS_DIR/enhance-fix-repair-phase.md"
+CONTRACT_PROMPT="$PROMPTS_DIR/enhance-fix-contract-phase.md"
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
-setup_log "audit-fix"
+setup_log "enhance-fix"
 
 # Defaults
-MAX_SECTIONS=0  # 0 = all unfixed
+MAX_SECTIONS=0  # 0 = all unimplemented
 MAX_PARALLEL=5  # concurrent Claude instances (API rate limit safe)
 MAX_REPAIRS=3
 NO_COMMIT=true
@@ -59,14 +59,14 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     -h|--help)
-      echo "Usage: audit-fix [--max N] [--parallel [N]] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
+      echo "Usage: enhance-fix [--max N] [--parallel [N]] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
       echo ""
-      echo "Fixes audit findings sequentially — one section at a time on the current branch."
+      echo "Implements enhancement suggestions sequentially — one section at a time on the current branch."
       echo "Each section builds on the previous one's changes, so there are no merge conflicts."
       echo ""
       echo "Options:"
-      echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
-      echo "  --max N          Max sections to fix (default: all)"
+      echo "  --commit         Commit progress automatically (default: no commit, changes left staged)"
+      echo "  --max N          Max sections to enhance (default: all)"
       echo "  --parallel [N]   Run sections in parallel using worktrees (default: sequential)"
       echo "                   N = max concurrent Claude instances (default: 5)"
       echo "  --model MODEL    Claude model to use (e.g., sonnet)"
@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
       echo "  --no-repair      Skip the auto-repair phase if checks fail"
       echo "  --max-repairs N  Max repair iterations (default: 3)"
-      echo "  --skip-contracts Skip the sprint contract generation phase"
+      echo "  --skip-contracts Skip the verification contract generation phase"
       exit 0
       ;;
     *)
@@ -94,8 +94,8 @@ build_claude_cmd
 
 BASE_BRANCH=$(git branch --show-current)
 
-# If we're on a leftover audit-fix branch from a previous failed run, switch back
-if [[ "$BASE_BRANCH" == audit-fix/* ]]; then
+# If we're on a leftover enhance-fix branch from a previous failed run, switch back
+if [[ "$BASE_BRANCH" == enhance-fix/* ]]; then
   for candidate in main master; do
     if git rev-parse --verify "$candidate" &>/dev/null; then
       log "Warning: on leftover branch '$BASE_BRANCH' — switching to $candidate"
@@ -104,37 +104,37 @@ if [[ "$BASE_BRANCH" == audit-fix/* ]]; then
       break
     fi
   done
-  if [[ "$BASE_BRANCH" == audit-fix/* ]]; then
-    echo "Error: on audit-fix branch and cannot find main/master to switch to."
+  if [[ "$BASE_BRANCH" == enhance-fix/* ]]; then
+    echo "Error: on enhance-fix branch and cannot find main/master to switch to."
     exit 1
   fi
 fi
 
 BASE_COMMIT=$(git rev-parse HEAD)
 
-# Pre-clean stale audit-fix branches/worktrees from previous parallel runs
-for stale in $(git branch --list 'audit-fix/*' 2>/dev/null | sed 's/^[* ]*//'); do
-  stale_name="${stale#audit-fix/}"
-  git worktree remove "$PROJECT_DIR/.audit-fix-worktrees/$stale_name" --force 2>/dev/null || true
-  rm -rf "$PROJECT_DIR/.audit-fix-worktrees/$stale_name" 2>/dev/null || true
+# Pre-clean stale enhance-fix branches/worktrees from previous parallel runs
+for stale in $(git branch --list 'enhance-fix/*' 2>/dev/null | sed 's/^[* ]*//'); do
+  stale_name="${stale#enhance-fix/}"
+  git worktree remove "$PROJECT_DIR/.enhance-fix-worktrees/$stale_name" --force 2>/dev/null || true
+  rm -rf "$PROJECT_DIR/.enhance-fix-worktrees/$stale_name" 2>/dev/null || true
   git branch -D "$stale" 2>/dev/null || true
 done
-rmdir "$PROJECT_DIR/.audit-fix-worktrees" 2>/dev/null || true
+rmdir "$PROJECT_DIR/.enhance-fix-worktrees" 2>/dev/null || true
 
 # Prefer verified report
-if [ -f "$PROJECT_DIR/audit-report-verified.md" ]; then
-  REPORT_FILE="$PROJECT_DIR/audit-report-verified.md"
-  log "Using verified report: audit-report-verified.md"
-elif [ -f "$PROJECT_DIR/audit-report.md" ]; then
-  REPORT_FILE="$PROJECT_DIR/audit-report.md"
-  log "Using unverified report: audit-report.md"
+if [ -f "$PROJECT_DIR/enhance-report-verified.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/enhance-report-verified.md"
+  log "Using verified report: enhance-report-verified.md"
+elif [ -f "$PROJECT_DIR/enhance-report.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/enhance-report.md"
+  log "Using unverified report: enhance-report.md"
 else
-  echo "Error: No audit report found. Run 'operator audit' first."
+  echo "Error: No enhance report found. Run 'operator enhance' first."
   exit 1
 fi
 
-PROGRESS_FILE="$PROJECT_DIR/audit-fix-progress.md"
-CHANGELOG_FILE="$PROJECT_DIR/audit-fix-changelog.md"
+PROGRESS_FILE="$PROJECT_DIR/enhance-fix-progress.md"
+CHANGELOG_FILE="$PROJECT_DIR/enhance-fix-changelog.md"
 
 # ── Extract sections from report ────────────────────────────────────
 
@@ -146,11 +146,11 @@ done < <(grep "^## " "$REPORT_FILE")
 ALL_COUNT=${#ALL_SECTIONS[@]}
 
 if [ "$ALL_COUNT" -eq 0 ]; then
-  echo "Error: No sections found in audit report."
+  echo "Error: No sections found in enhance report."
   exit 1
 fi
 
-# ── Filter to unfixed sections ──────────────────────────────────────
+# ── Filter to unimplemented sections ──────────────────────────────
 
 SECTIONS=()
 if [ -f "$PROGRESS_FILE" ]; then
@@ -166,7 +166,7 @@ fi
 SECTION_COUNT=${#SECTIONS[@]}
 
 if [ "$SECTION_COUNT" -eq 0 ]; then
-  log "All sections already fixed!"
+  log "All sections already enhanced!"
   exit 0
 fi
 
@@ -180,11 +180,11 @@ MODE_LABEL="sequential"
 [ "$PARALLEL" = true ] && MODE_LABEL="parallel ($MAX_PARALLEL concurrent)"
 
 echo "================================================"
-echo "  Audit Fix — $SECTION_COUNT sections ($MODE_LABEL)"
+echo "  Enhance Fix — $SECTION_COUNT sections ($MODE_LABEL)"
 [ -n "$MODEL" ] && echo "  Model:    $MODEL"
 [ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
 echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
-[ "$SKIP_CONTRACTS" = false ] && echo "  Contracts: enabled (sprint contracts before fixing)"
+[ "$SKIP_CONTRACTS" = false ] && echo "  Contracts: enabled (verification contracts before implementing)"
 [ "$SKIP_CONTRACTS" = true ] && echo "  Contracts: disabled"
 [ "$NO_REPAIR" = true ] && echo "  Repair:   disabled"
 [ "$NO_COMMIT" = false ] && echo "  Commit:   enabled"
@@ -194,21 +194,21 @@ echo "  Report:   $(basename "$REPORT_FILE")"
 echo "  Log:      $LOG_FILE"
 echo "================================================"
 echo ""
-log "Started audit-fix — $SECTION_COUNT sections ($MODE_LABEL)"
+log "Started enhance-fix — $SECTION_COUNT sections ($MODE_LABEL)"
 log "Base commit: $BASE_COMMIT"
 
-# ── Generate sprint contracts ─────────────────────────────────────────
+# ── Generate verification contracts ──────────────────────────────────
 
-CONTRACT_FILE="$PROJECT_DIR/audit-fix-contracts.md"
+CONTRACT_FILE="$PROJECT_DIR/enhance-fix-contracts.md"
 CONTRACTS_CONTENT=""
 
 if [ "$SKIP_CONTRACTS" = false ] && [ -f "$CONTRACT_PROMPT" ]; then
   echo ""
-  log "Generating sprint contracts (defining 'done' before fixing)..."
+  log "Generating verification contracts (defining 'done' before implementing)..."
 
   CONTRACT_INPUT=$(mktemp)
   cat "$CONTRACT_PROMPT" > "$CONTRACT_INPUT"
-  printf '\n---\n\n## Audit Report\n\n' >> "$CONTRACT_INPUT"
+  printf '\n---\n\n## Enhance Report\n\n' >> "$CONTRACT_INPUT"
   cat "$REPORT_FILE" >> "$CONTRACT_INPUT"
 
   # Run in a temp dir so Claude can't edit source files (it has --dangerously-skip-permissions)
@@ -216,10 +216,10 @@ if [ "$SKIP_CONTRACTS" = false ] && [ -f "$CONTRACT_PROMPT" ]; then
   if run_claude "$CONTRACT_INPUT" "Generating verification contracts" "$CONTRACT_SANDBOX"; then
     CONTRACTS_CONTENT="$CLAUDE_OUTPUT"
     echo "$CONTRACTS_CONTENT" > "$CONTRACT_FILE"
-    log "Contracts written to audit-fix-contracts.md"
+    log "Contracts written to enhance-fix-contracts.md"
 
-    # Count contracts generated (sections use ## or ### headings)
-    CONTRACT_COUNT=$(echo "$CONTRACTS_CONTENT" | grep -c "^##\+ " 2>/dev/null) || CONTRACT_COUNT=0
+    # Count contracts generated
+    CONTRACT_COUNT=$(echo "$CONTRACTS_CONTENT" | grep -c "^### " 2>/dev/null) || CONTRACT_COUNT=0
     log "Generated $CONTRACT_COUNT verification contracts"
   else
     log "Contract generation stalled — proceeding without contracts"
@@ -239,10 +239,10 @@ cleanup() {
   if [ "$PARALLEL" = true ]; then
     for name in "${SANITIZED_NAMES[@]}"; do
       git worktree remove "${WORKTREE_BASE:-/tmp}/$name" --force 2>/dev/null || rm -rf "${WORKTREE_BASE:-/tmp}/$name"
-      git branch -D "audit-fix/$name" 2>/dev/null || true
+      git branch -D "enhance-fix/$name" 2>/dev/null || true
     done
-    for stale in $(git branch --list 'audit-fix/*' 2>/dev/null | sed 's/^[* ]*//'); do
-      local stale_name="${stale#audit-fix/}"
+    for stale in $(git branch --list 'enhance-fix/*' 2>/dev/null | sed 's/^[* ]*//'); do
+      local stale_name="${stale#enhance-fix/}"
       git worktree remove "${WORKTREE_BASE:-/tmp}/$stale_name" --force 2>/dev/null || rm -rf "${WORKTREE_BASE:-/tmp}/$stale_name" 2>/dev/null || true
       git branch -D "$stale" 2>/dev/null || true
     done
@@ -276,28 +276,29 @@ $FIX_TEMPLATE
 
 ---
 
-## Section to fix (${idx} of ${SECTION_COUNT})
+## Section to enhance (${idx} of ${SECTION_COUNT})
 
 **Section name:** $section
 
-### Findings to fix
+### Suggestions to implement
 
 $SECTION_CONTENT
 PROMPT_EOF
 
+  # Append contract if available
   if [ -n "$SECTION_CONTRACT" ]; then
     cat >> "$WORK_DIR/prompt-$idx.md" <<CONTRACT_EOF
 
 ### Verification Contract
 
-The following contract defines what "fixed" means for each finding. Your fixes MUST satisfy these conditions. After fixing, verify each DONE-when condition and run each VERIFY-by command.
+The following contract defines what "enhanced" means for each suggestion. Your changes MUST satisfy these conditions. After implementing, verify each DONE-when condition and run each VERIFY-by command.
 
 $SECTION_CONTRACT
 CONTRACT_EOF
   fi
 done
 
-# ── Execute fixes ────────────────────────────────────────────────────
+# ── Execute enhancements ─────────────────────────────────────────────
 
 MERGED_SECTIONS=()
 CONFLICT_SECTIONS=()
@@ -306,7 +307,7 @@ SANITIZED_NAMES=()
 if [ "$PARALLEL" = true ]; then
   # ── Parallel mode: worktrees + batch execution + two-pass merge ──
 
-  WORKTREE_BASE="$PROJECT_DIR/.audit-fix-worktrees"
+  WORKTREE_BASE="$PROJECT_DIR/.enhance-fix-worktrees"
   mkdir -p "$WORKTREE_BASE"
 
   PREPARED_INDICES=()
@@ -318,7 +319,7 @@ if [ "$PARALLEL" = true ]; then
     name=$(sanitize_name "$section")
     SANITIZED_NAMES+=("$name")
 
-    branch="audit-fix/$name"
+    branch="enhance-fix/$name"
     wt="$WORKTREE_BASE/$name"
 
     [ -d "$wt" ] && { git worktree remove "$wt" --force 2>/dev/null || rm -rf "$wt"; }
@@ -350,7 +351,7 @@ if [ "$PARALLEL" = true ]; then
     batch_size=$((batch_end - batch_start + 1))
 
     echo ""
-    log "Batch $BATCH_NUM: launching $batch_size fixers (sections $((batch_start + 1))-$((batch_end + 1)) of $TOTAL_PREPARED)"
+    log "Batch $BATCH_NUM: launching $batch_size enhancers (sections $((batch_start + 1))-$((batch_end + 1)) of $TOTAL_PREPARED)"
 
     BATCH_PIDS=()
 
@@ -365,12 +366,12 @@ if [ "$PARALLEL" = true ]; then
       BATCH_PIDS+=($!)
       ALL_PIDS+=($!)
 
-      log "  Launched fixer: $section (PID: $!)"
+      log "  Launched enhancer: $section (PID: $!)"
       sleep 3
     done
 
     echo ""
-    spin_all "Fixing batch $BATCH_NUM ($batch_size sections)" "$WORK_DIR" "${BATCH_PIDS[@]}"
+    spin_all "Enhancing batch $BATCH_NUM ($batch_size sections)" "$WORK_DIR" "${BATCH_PIDS[@]}"
 
     for pid in "${BATCH_PIDS[@]}"; do
       wait "$pid" 2>/dev/null || TOTAL_FAILURES=$((TOTAL_FAILURES + 1))
@@ -383,17 +384,17 @@ if [ "$PARALLEL" = true ]; then
   [ $TOTAL_FAILURES -gt 0 ] && log "Warning: $TOTAL_FAILURES section(s) had errors"
 
   # Merge worktree branches back (two-pass: cherry-pick + retry conflicts)
-  merge_parallel_branches "audit-fix" "fixes"
+  merge_parallel_branches "enhance-fix" "enhancements"
 
 else
-  # ── Sequential mode: fix sections one at a time on main ──────────
+  # ── Sequential mode: enhance sections one at a time on main ──────
 
   for i in "${!SECTIONS[@]}"; do
     section="${SECTIONS[$i]}"
     idx=$((i + 1))
 
     echo ""
-    log "[$idx/$SECTION_COUNT] Fixing: $section"
+    log "[$idx/$SECTION_COUNT] Enhancing: $section"
 
     PRE_FIX=$(git rev-parse HEAD)
 
@@ -415,16 +416,16 @@ else
   MERGED=${#MERGED_SECTIONS[@]}
 
   echo ""
-  log "Fixed: $MERGED/$SECTION_COUNT sections"
+  log "Enhanced: $MERGED/$SECTION_COUNT sections"
   [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "Failed: ${CONFLICT_SECTIONS[*]}"
 
-  # If NO_COMMIT, squash all fix commits into staged changes
+  # If NO_COMMIT, squash all enhancement commits into staged changes
   if [ "$NO_COMMIT" = true ] && [ "$MERGED" -gt 0 ]; then
     git reset --soft "$BASE_COMMIT" 2>/dev/null || true
   fi
 fi
 
-# ── Show fix summaries ──────────────────────────────────────────────
+# ── Show enhancement summaries ──────────────────────────────────────
 
 for i in "${!SECTIONS[@]}"; do
   idx=$((i + 1))
@@ -530,7 +531,7 @@ fi
 # Create progress file if needed
 if [ ! -f "$PROGRESS_FILE" ]; then
   {
-    echo "# Audit Fix Progress"
+    echo "# Enhance Fix Progress"
     echo ""
     echo "## Sections"
     for section in "${ALL_SECTIONS[@]}"; do
@@ -539,12 +540,12 @@ if [ ! -f "$PROGRESS_FILE" ]; then
   } > "$PROGRESS_FILE"
 fi
 
-# Mark merged sections as fixed
+# Mark merged sections as enhanced
 for section in "${MERGED_SECTIONS[@]}"; do
   TEMP_PF=$(mktemp)
   while IFS= read -r line; do
     if echo "$line" | grep -qF "[ ] $section"; then
-      echo "- [x] $section — Fixed $(date '+%Y-%m-%d')"
+      echo "- [x] $section — Enhanced $(date '+%Y-%m-%d')"
     else
       echo "$line"
     fi
@@ -554,7 +555,7 @@ done
 
 # Append to changelog
 if [ ! -f "$CHANGELOG_FILE" ]; then
-  echo "# Audit Fix Changelog" > "$CHANGELOG_FILE"
+  echo "# Enhance Fix Changelog" > "$CHANGELOG_FILE"
   echo "" >> "$CHANGELOG_FILE"
 fi
 
@@ -562,9 +563,9 @@ FIX_MODE="Sequential"
 [ "$PARALLEL" = true ] && FIX_MODE="Parallel"
 
 {
-  echo "## $FIX_MODE Fix — $(date '+%Y-%m-%d %H:%M')"
+  echo "## $FIX_MODE Enhance — $(date '+%Y-%m-%d %H:%M')"
   echo ""
-  echo "Sections fixed: $MERGED/$SECTION_COUNT"
+  echo "Sections enhanced: $MERGED/$SECTION_COUNT"
   [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && echo "Conflicts (skipped): ${CONFLICT_SECTIONS[*]}"
   echo ""
 
@@ -593,10 +594,9 @@ FIX_MODE="Sequential"
   echo "- Sections merged: $MERGED/$SECTION_COUNT ($(( MERGED * 100 / (SECTION_COUNT > 0 ? SECTION_COUNT : 1) ))%)"
   echo "- Conflicts: ${#CONFLICT_SECTIONS[@]}"
   echo "- Repair iterations needed: $REPAIR_ITERATION"
-  echo "- Fix compilation success: $([ "$TSC_OK" = true ] && echo "yes" || echo "no")"
   echo "- All checks passing: $([ "$ALL_CHECKS_OK" = true ] && echo "yes" || echo "no")"
-  [ -n "$CONTRACTS_CONTENT" ] && echo "- Sprint contracts: yes ($CONTRACT_COUNT generated)"
-  [ -z "$CONTRACTS_CONTENT" ] && echo "- Sprint contracts: skipped"
+  [ -n "$CONTRACTS_CONTENT" ] && echo "- Verification contracts: yes ($CONTRACT_COUNT generated)"
+  [ -z "$CONTRACTS_CONTENT" ] && echo "- Verification contracts: skipped"
   ELAPSED_SO_FAR=$(( $(date +%s) - START_TIME ))
   echo "- Total time: $(format_elapsed $ELAPSED_SO_FAR)"
   echo ""
@@ -608,15 +608,15 @@ FIX_MODE="Sequential"
 git add "$PROGRESS_FILE" "$CHANGELOG_FILE" 2>/dev/null || true
 [ -f "$CONTRACT_FILE" ] && git add "$CONTRACT_FILE" 2>/dev/null || true
 if [ "$NO_COMMIT" = false ]; then
-  git commit -m "docs(audit): update fix progress and changelog" 2>/dev/null || true
+  git commit -m "docs(enhance): update fix progress and changelog" 2>/dev/null || true
 fi
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
 
 echo ""
 log "================================================"
-log "  Audit Fix complete! ($(format_elapsed $ELAPSED))"
-log "  Sections fixed: $MERGED/$SECTION_COUNT"
+log "  Enhance Fix complete! ($(format_elapsed $ELAPSED))"
+log "  Sections enhanced: $MERGED/$SECTION_COUNT"
 [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "  Conflicts:      ${CONFLICT_SECTIONS[*]}"
 [ "$MERGED" -gt 0 ] && log "  tsc:            $([ "$TSC_OK" = true ] && echo "clean" || echo "errors")"
 [ "$MERGED" -gt 0 ] && log "  lint:           $([ "$LINT_OK" = true ] && echo "clean" || echo "errors")"

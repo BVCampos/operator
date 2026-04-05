@@ -1,0 +1,236 @@
+#!/bin/bash
+# vuln-test — Generate security tests for confirmed vulnerabilities (one agent per section)
+# Usage: vuln-test [--max N] [--model MODEL] [--effort LEVEL]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+TEST_PROMPT="$PROMPTS_DIR/vuln-test-phase.md"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "vuln-test"
+
+# Defaults
+MAX_SECTIONS=0  # 0 = all
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
+  case $1 in
+    --max)
+      MAX_SECTIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: vuln-test [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
+      echo ""
+      echo "Generates security test cases for confirmed vulnerabilities."
+      echo "Runs one agent per section in parallel."
+      echo "Run after 'operator vuln triage'."
+      echo ""
+      echo "Options:"
+      echo "  --max N          Max sections to process (default: all)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo ""
+      echo "Files:"
+      echo "  vuln-report-triaged.md     Input (preferred) or vuln-report.md (fallback)"
+      echo "  vulns/YYYY-MM-DD/*.triage.md  Per-section triage results"
+      echo "  vulns/YYYY-MM-DD/*.test.*  Output — security test files"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_SECTIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+validate_env
+build_claude_cmd
+
+# Prefer triaged report
+if [ -f "$PROJECT_DIR/vuln-report-triaged.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/vuln-report-triaged.md"
+  log "Using triaged report: vuln-report-triaged.md"
+elif [ -f "$PROJECT_DIR/vuln-report.md" ]; then
+  REPORT_FILE="$PROJECT_DIR/vuln-report.md"
+  log "Warning: Using untriaged report: vuln-report.md (run 'operator vuln triage' first for better results)"
+else
+  echo "Error: No vulnerability report found. Run 'operator vuln' first."
+  exit 1
+fi
+
+# Extract section headings from report
+ALL_SECTIONS=()
+while IFS= read -r line; do
+  ALL_SECTIONS+=("$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')")
+done < <(grep "^## " "$REPORT_FILE")
+
+SECTION_COUNT=${#ALL_SECTIONS[@]}
+
+if [ "$SECTION_COUNT" -eq 0 ]; then
+  echo "Error: No sections found in vulnerability report."
+  exit 1
+fi
+
+# Apply max limit
+SECTIONS=("${ALL_SECTIONS[@]}")
+if [ "$MAX_SECTIONS" -gt 0 ] && [ "$MAX_SECTIONS" -lt "$SECTION_COUNT" ]; then
+  SECTIONS=("${SECTIONS[@]:0:$MAX_SECTIONS}")
+  SECTION_COUNT=${#SECTIONS[@]}
+fi
+
+REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+VULN_DATE=$(date +%Y-%m-%d)
+VULN_DIR="$PROJECT_DIR/vulns/$VULN_DATE"
+
+echo "================================================"
+echo "  Vulnerability Test Generation — $SECTION_COUNT sections in parallel"
+echo "  Project:  $PROJECT_DIR"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+echo "  Report:   $(basename "$REPORT_FILE") ($REPORT_LINES lines)"
+echo "  Output:   vulns/$VULN_DATE/"
+echo "  Log:      $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started vuln-test — $SECTION_COUNT sections in parallel"
+
+# Read the test prompt template
+TEST_TEMPLATE=$(cat "$TEST_PROMPT")
+
+# Create temp directory for per-section prompts and outputs
+WORK_DIR=$(mktemp -d)
+trap "rm -rf '$WORK_DIR'" EXIT
+
+# Ensure vulns output directory exists
+mkdir -p "$VULN_DIR"
+
+START_TIME=$(date +%s)
+
+# Launch one Claude instance per section
+PIDS=()
+for i in "${!SECTIONS[@]}"; do
+  section="${SECTIONS[$i]}"
+  idx=$((i + 1))
+
+  SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
+
+  SECTION_SLUG=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+  # Load triage results if available
+  TRIAGE_CONTENT=""
+  if [ -f "$VULN_DIR/$SECTION_SLUG.triage.md" ]; then
+    TRIAGE_CONTENT=$(cat "$VULN_DIR/$SECTION_SLUG.triage.md")
+  fi
+
+  # Load detailed vuln report if available
+  VULN_CONTENT=""
+  if [ -f "$VULN_DIR/$SECTION_SLUG.vuln.md" ]; then
+    VULN_CONTENT=$(cat "$VULN_DIR/$SECTION_SLUG.vuln.md")
+  fi
+
+  # Build per-section prompt
+  cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
+$TEST_TEMPLATE
+
+---
+
+## Section to write tests for (${idx} of ${SECTION_COUNT})
+
+**Section name:** $section
+**Output date directory:** vulns/$VULN_DATE
+**Section slug:** $SECTION_SLUG
+
+### Findings
+
+$SECTION_CONTENT
+PROMPT_EOF
+
+  if [ -n "$TRIAGE_CONTENT" ]; then
+    cat >> "$WORK_DIR/prompt-$idx.md" <<TRIAGE_EOF
+
+### Triage Results (with reproduction steps)
+
+$TRIAGE_CONTENT
+TRIAGE_EOF
+  fi
+
+  if [ -n "$VULN_CONTENT" ]; then
+    cat >> "$WORK_DIR/prompt-$idx.md" <<VULN_EOF
+
+### Detailed Vulnerability Report
+
+$VULN_CONTENT
+VULN_EOF
+  fi
+
+  # Launch claude in background
+  command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1 &
+  PIDS+=($!)
+
+  log "  Launched test writer $idx/$SECTION_COUNT: $section (PID: $!)"
+done
+
+echo ""
+
+spin_all "Generating security tests" "$WORK_DIR" "${PIDS[@]}"
+
+# Wait for all processes and collect exit codes
+FAILURES=0
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || FAILURES=$((FAILURES + 1))
+done
+
+echo ""
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: test generation stalled (no output for ${CLAUDE_TIMEOUT}m) — some sections may be incomplete"
+[ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had errors"
+
+# Show results and count test files created
+TESTS_CREATED=0
+for i in "${!SECTIONS[@]}"; do
+  idx=$((i + 1))
+  section="${SECTIONS[$i]}"
+  SECTION_SLUG=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+  if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+    echo ""
+    log "--- $section ---"
+    cat "$WORK_DIR/output-$idx.md"
+    cat "$WORK_DIR/output-$idx.md" >> "$LOG_FILE"
+  fi
+
+  # Count test files created for this section
+  TEST_COUNT=$(find "$VULN_DIR" -name "$SECTION_SLUG.test.*" 2>/dev/null | wc -l | tr -d ' ')
+  TESTS_CREATED=$((TESTS_CREATED + TEST_COUNT))
+done
+
+# List all test files created
+echo ""
+log "Test files created:"
+find "$VULN_DIR" -name "*.test.*" 2>/dev/null | while read -r f; do
+  log "  $f"
+done
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+echo ""
+log "================================================"
+log "  Test Generation COMPLETE! ($(format_elapsed $ELAPSED))"
+log "  Sections processed: $SECTION_COUNT"
+log "  Test files created: $TESTS_CREATED"
+log "  Output: $VULN_DIR/"
+log "  Log:    $LOG_FILE"
+log "================================================"

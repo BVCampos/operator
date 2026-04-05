@@ -20,6 +20,16 @@ Commands:
   audit fix                           Fix confirmed audit findings
   audit full                          Audit → verify → fix pipeline
   audit reset                         Clear state files for a fresh audit
+  enhance                             Systematic codebase enhancement
+  enhance verify                      Verify enhancement suggestions
+  enhance fix                         Implement confirmed enhancements
+  enhance full                        Enhance → verify → fix pipeline
+  enhance reset                       Clear state files for a fresh enhance
+  vuln                                Systematic vulnerability hunt
+  vuln triage                         Triage and verify exploitability
+  vuln test                           Generate security tests for confirmed vulns
+  vuln full                           Hunt -> triage -> test pipeline
+  vuln reset                          Clear state files for a fresh scan
   ralph start --prd <file.md>         Start Ralph loop from PRD
   ralph status                        List Ralph sessions
   ralph logs <name>                   Attach to Ralph session
@@ -38,6 +48,10 @@ Examples:
   operator review --model sonnet      Review using a specific model
   operator audit --effort high        Audit with high thinking effort
   operator audit full --model sonnet --effort low   Fast audit pipeline
+  operator enhance --max 10            Find simplifications and speedups
+  operator enhance full --model sonnet  Full enhance pipeline
+  operator vuln --max 10              Hunt for vulnerabilities
+  operator vuln full --model opus     Full security scan pipeline
   operator ralph start --prd tasks/feature.md --tool claude --max 20
 
 Documentation: https://github.com/BVCampos/operator
@@ -81,6 +95,62 @@ case "$COMMAND" in
       *)
         # Flag or number passed directly to audit-loop (e.g., operator audit --max 5)
         exec "$SCRIPT_DIR/audit-loop" "$SUBCMD" "$@"
+        ;;
+    esac
+    ;;
+
+  enhance)
+    if [ $# -eq 0 ]; then
+      exec "$SCRIPT_DIR/enhance-loop" "$@"
+    fi
+
+    SUBCMD="$1"
+    shift
+
+    case "$SUBCMD" in
+      verify)
+        exec "$SCRIPT_DIR/enhance-verify" "$@"
+        ;;
+      fix)
+        exec "$SCRIPT_DIR/enhance-fix" "$@"
+        ;;
+      full)
+        exec "$SCRIPT_DIR/enhance-loop-fix" "$@"
+        ;;
+      reset)
+        exec "$SCRIPT_DIR/enhance-reset" "$@"
+        ;;
+      *)
+        # Flag or number passed directly to enhance-loop (e.g., operator enhance --max 5)
+        exec "$SCRIPT_DIR/enhance-loop" "$SUBCMD" "$@"
+        ;;
+    esac
+    ;;
+
+  vuln)
+    if [ $# -eq 0 ]; then
+      exec "$SCRIPT_DIR/vuln-loop" "$@"
+    fi
+
+    SUBCMD="$1"
+    shift
+
+    case "$SUBCMD" in
+      triage)
+        exec "$SCRIPT_DIR/vuln-triage" "$@"
+        ;;
+      test)
+        exec "$SCRIPT_DIR/vuln-test" "$@"
+        ;;
+      full)
+        exec "$SCRIPT_DIR/vuln-loop-test" "$@"
+        ;;
+      reset)
+        exec "$SCRIPT_DIR/vuln-reset" "$@"
+        ;;
+      *)
+        # Flag or number passed directly to vuln-loop (e.g., operator vuln --max 5)
+        exec "$SCRIPT_DIR/vuln-loop" "$SUBCMD" "$@"
         ;;
     esac
     ;;

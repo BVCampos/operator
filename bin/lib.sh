@@ -135,6 +135,136 @@ format_elapsed() {
   echo "$(( $1 / 60 ))m$(( $1 % 60 ))s"
 }
 
+# ── Parallel branch merge ────────────────────────────────────────────
+#
+# merge_parallel_branches <branch_prefix> <label>
+#
+# Two-pass strategy that fixes the cascading conflict problem:
+#
+# Pass 1 — Cherry-pick with commit: HEAD advances after each section,
+#   so subsequent cherry-picks get proper 3-way merges instead of
+#   conflicting with staged-but-uncommitted changes from earlier sections.
+#
+# Pass 2 — Re-run conflicts: sections that failed in pass 1 are re-run
+#   against the post-merge state. Claude reads the updated code and
+#   applies only the fixes that still apply.
+#
+# If NO_COMMIT=true, a final git reset --soft squashes everything back
+# into staged changes.
+#
+# Globals read:  SECTIONS, SANITIZED_NAMES, BASE_COMMIT, NO_COMMIT, WORK_DIR
+# Globals set:   MERGED_SECTIONS, CONFLICT_SECTIONS, MERGED
+#
+merge_parallel_branches() {
+  local prefix=$1
+  local label=$2
+
+  log "Merging $label..."
+
+  # Stash dirty state (progress files, reports, etc.)
+  local stashed=false
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    git stash push -m "$prefix: pre-merge stash" --quiet 2>/dev/null && stashed=true
+  fi
+
+  MERGED_SECTIONS=()
+  CONFLICT_SECTIONS=()
+  local retry_indices=()
+
+  # ── Pass 1: Cherry-pick with commit (HEAD advances) ──────────────
+  for i in "${!SECTIONS[@]}"; do
+    local section="${SECTIONS[$i]}"
+    local name="${SANITIZED_NAMES[$i]}"
+    local branch="$prefix/$name"
+
+    local commit_count
+    commit_count=$(git log --oneline "$BASE_COMMIT..$branch" 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "$commit_count" -eq 0 ]; then
+      log "  ✗ $section: no commits"
+      continue
+    fi
+
+    local commits ok=true
+    commits=$(git log --reverse --format="%H" "$BASE_COMMIT..$branch" 2>/dev/null)
+
+    for commit in $commits; do
+      if ! git cherry-pick --no-edit "$commit" 2>/dev/null; then
+        git cherry-pick --abort 2>/dev/null || true
+        retry_indices+=("$i")
+        ok=false
+        break
+      fi
+    done
+
+    if [ "$ok" = true ]; then
+      MERGED_SECTIONS+=("$section")
+      log "  ✓ $section ($commit_count commits)"
+    else
+      log "  ✗ $section (conflict — queued for retry)"
+    fi
+  done
+
+  local pass1_merged=${#MERGED_SECTIONS[@]}
+
+  # ── Pass 2: Re-run conflicting sections against merged state ─────
+  if [ ${#retry_indices[@]} -gt 0 ]; then
+    echo ""
+    log "Retrying ${#retry_indices[@]} conflicting section(s) against merged state..."
+
+    local still_failed=()
+
+    for idx_i in "${retry_indices[@]}"; do
+      local section="${SECTIONS[$idx_i]}"
+      local idx=$((idx_i + 1))
+      local prompt_file="$WORK_DIR/prompt-$idx.md"
+
+      if [ ! -f "$prompt_file" ]; then
+        still_failed+=("$section")
+        log "  ✗ $section (no prompt for retry)"
+        continue
+      fi
+
+      log "  Re-running: $section"
+
+      local pre_retry
+      pre_retry=$(git rev-parse HEAD)
+
+      if run_claude "$prompt_file" "Retry: $section"; then
+        local retry_commits
+        retry_commits=$(git log --oneline "$pre_retry..HEAD" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$retry_commits" -gt 0 ]; then
+          MERGED_SECTIONS+=("$section")
+          log "  ✓ $section (retry, $retry_commits commits)"
+          [ -n "$CLAUDE_OUTPUT" ] && echo "$CLAUDE_OUTPUT" > "$WORK_DIR/output-$idx.md"
+        else
+          still_failed+=("$section")
+          log "  ✗ $section (retry — no commits)"
+        fi
+      else
+        still_failed+=("$section")
+        log "  ✗ $section (retry stalled)"
+      fi
+    done
+
+    CONFLICT_SECTIONS=("${still_failed[@]}")
+  fi
+
+  MERGED=${#MERGED_SECTIONS[@]}
+
+  echo ""
+  log "Merged: $MERGED/${#SECTIONS[@]} sections ($pass1_merged direct, $((MERGED - pass1_merged)) retried)"
+  [ ${#CONFLICT_SECTIONS[@]} -gt 0 ] && log "Conflicts: ${CONFLICT_SECTIONS[*]}"
+
+  # If NO_COMMIT, squash all merge commits into staged changes
+  if [ "$NO_COMMIT" = true ] && [ "$MERGED" -gt 0 ]; then
+    git reset --soft "$BASE_COMMIT" 2>/dev/null || true
+  fi
+
+  # Restore stashed state
+  [ "$stashed" = true ] && { git stash pop --quiet 2>/dev/null || true; }
+}
+
 # ── Spinner internals ─────────────────────────────────────────────────
 
 SPIN_TIMED_OUT=false
@@ -215,6 +345,8 @@ _update_spin_activity() {
 }
 
 # Activity check for spin_all — watches multiple output files in a work dir
+# Also checks WORKTREE_BASE (if set) for file modifications, since claude --print
+# only writes stdout at the end — during execution output files stay at 0 bytes.
 _update_spin_activity_multi() {
   local work_dir=$1
   local combined_bytes
@@ -226,6 +358,23 @@ _update_spin_activity_multi() {
       | grep -v '^[[:space:]]*$' | grep -v '^```' | grep -v '^[#|>]' \
       | tail -1 | sed 's/^[*_ -]*//' | cut -c1-60)
     [ -n "$line" ] && _spin_activity="$line"
+    return
+  fi
+
+  # Check worktree directories for file modifications (claude edits files directly)
+  if [ -n "$_spin_marker" ] && [ -f "$_spin_marker" ] && [ -n "${WORKTREE_BASE:-}" ] && [ -d "${WORKTREE_BASE:-}" ]; then
+    local recent
+    recent=$(find "$WORKTREE_BASE" -maxdepth 6 \
+      \( -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.jsx' \
+         -o -name '*.py' -o -name '*.sh' -o -name '*.md' \) \
+      -newer "$_spin_marker" \
+      ! -path '*/node_modules/*' ! -path '*/.git/*' \
+      ! -path '*/dist/*' ! -path '*/.next/*' \
+      2>/dev/null | head -1)
+    if [ -n "$recent" ]; then
+      touch "$_spin_marker"
+      _spin_activity="editing ${recent##*/}"
+    fi
   fi
 }
 
@@ -314,6 +463,18 @@ spin_all() {
   _init_spin_activity
   local check_counter=0
 
+  # Build stall check value — includes output bytes AND marker mtime (worktree activity)
+  # This prevents false stall kills when claude --print is editing files but stdout is buffered
+  _spin_all_stall_val() {
+    local val
+    val=$(cat "$work_dir"/output-*.md 2>/dev/null | wc -c || echo 0)
+    # Include marker mtime so worktree file edits reset the stall timer
+    if [ -n "${_spin_marker:-}" ] && [ -f "${_spin_marker:-}" ]; then
+      val="${val}:$(stat -f %m "$_spin_marker" 2>/dev/null || stat -c %Y "$_spin_marker" 2>/dev/null || echo 0)"
+    fi
+    echo "$val"
+  }
+
   # Non-TTY fallback
   if [ ! -t 1 ]; then
     echo "  $label — $# sections..."
@@ -326,7 +487,8 @@ spin_all() {
       [ $running -eq 0 ] && break
       check_counter=$((check_counter + 1))
       if (( check_counter % 10 == 0 )); then
-        if _stall_detected "$(cat "$work_dir"/output-*.md 2>/dev/null | wc -c || echo 0)" "$stall_secs"; then
+        _update_spin_activity_multi "$work_dir"
+        if _stall_detected "$(_spin_all_stall_val)" "$stall_secs"; then
           for pid in "$@"; do kill "$pid" 2>/dev/null || true; done
           echo "  ✗ $label no output for ${CLAUDE_TIMEOUT}m — killed $running remaining"
           _cleanup_spin_activity
@@ -334,7 +496,6 @@ spin_all() {
         fi
       fi
       if (( check_counter % 30 == 0 )); then
-        _update_spin_activity_multi "$work_dir"
         if [ -n "$_spin_activity" ] && [ "$_spin_activity" != "$last_logged_activity" ]; then
           echo "    >> $_spin_activity"
           last_logged_activity="$_spin_activity"
@@ -362,7 +523,8 @@ spin_all() {
 
     check_counter=$((check_counter + 1))
     if (( check_counter % 50 == 0 )); then
-      if _stall_detected "$(cat "$work_dir"/output-*.md 2>/dev/null | wc -c || echo 0)" "$stall_secs"; then
+      _update_spin_activity_multi "$work_dir"
+      if _stall_detected "$(_spin_all_stall_val)" "$stall_secs"; then
         for pid in "$@"; do kill "$pid" 2>/dev/null || true; done
         local done_count=$(( total - running ))
         printf "\033[2K\r  ✗ %s no output for %dm — %d/%d complete, killed %d remaining\n" \
@@ -370,7 +532,6 @@ spin_all() {
         _cleanup_spin_activity
         return
       fi
-      _update_spin_activity_multi "$work_dir"
     fi
 
     local elapsed=$(( SECONDS - start ))

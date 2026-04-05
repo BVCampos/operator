@@ -1,0 +1,88 @@
+#!/bin/bash
+# enhance-reset — Clear all enhance state files to start a fresh enhance cycle
+# Usage: enhance-reset [--force]
+
+set -e
+
+FORCE=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --force|-f)
+      FORCE=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: enhance-reset [--force]"
+      echo ""
+      echo "Removes all enhance state files so you can start a fresh enhance cycle."
+      echo ""
+      echo "Files removed:"
+      echo "  enhance-progress.md          Section tracking"
+      echo "  enhance-report.md            Suggestions"
+      echo "  enhance-report-verified.md   Verified suggestions"
+      echo "  enhance-fix-progress.md      Fix tracking"
+      echo "  enhance-fix-changelog.md     Fix log"
+      echo "  enhance-fix-contracts.md     Verification contracts"
+      echo ""
+      echo "Options:"
+      echo "  --force, -f    Skip confirmation prompt"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+FILES=(
+  enhance-progress.md
+  enhance-report.md
+  enhance-report-verified.md
+  enhance-fix-progress.md
+  enhance-fix-changelog.md
+  enhance-fix-contracts.md
+)
+
+# Check what exists
+FOUND=()
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] && FOUND+=("$f")
+done
+
+if [ ${#FOUND[@]} -eq 0 ]; then
+  echo "No enhance state files found. Nothing to reset."
+  exit 0
+fi
+
+echo "Enhance state files found:"
+for f in "${FOUND[@]}"; do
+  echo "  $f"
+done
+echo ""
+
+if [ "$FORCE" = false ]; then
+  read -p "Remove these files and start fresh? [y/N] " -n 1 -r
+  echo ""
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Cancelled."
+    exit 0
+  fi
+fi
+
+for f in "${FOUND[@]}"; do
+  rm "$f"
+  echo "  Removed $f"
+done
+
+echo ""
+echo "Enhance state cleared. Run 'operator enhance' or 'operator enhance full' to start a new cycle."

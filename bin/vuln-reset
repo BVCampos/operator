@@ -1,0 +1,87 @@
+#!/bin/bash
+# vuln-reset — Clear all vulnerability hunt state files to start a fresh scan
+# Usage: vuln-reset [--force]
+
+set -e
+
+FORCE=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --force|-f)
+      FORCE=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: vuln-reset [--force]"
+      echo ""
+      echo "Removes all vulnerability hunt state files so you can start a fresh scan."
+      echo ""
+      echo "Files removed:"
+      echo "  vuln-progress.md           Section tracking"
+      echo "  vuln-report.md             Findings"
+      echo "  vuln-report-triaged.md     Triaged findings"
+      echo "  vulns/                     Per-section reports and tests"
+      echo ""
+      echo "Options:"
+      echo "  --force, -f    Skip confirmation prompt"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Error: Not inside a git repository."
+  exit 1
+fi
+
+PROJECT_DIR="$(git rev-parse --show-toplevel)"
+cd "$PROJECT_DIR"
+
+FILES=(
+  vuln-progress.md
+  vuln-report.md
+  vuln-report-triaged.md
+)
+
+# Check what exists
+FOUND=()
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] && FOUND+=("$f")
+done
+[ -d "vulns" ] && FOUND+=("vulns/")
+
+if [ ${#FOUND[@]} -eq 0 ]; then
+  echo "No vulnerability hunt state files found. Nothing to reset."
+  exit 0
+fi
+
+echo "Vulnerability hunt state files found:"
+for f in "${FOUND[@]}"; do
+  echo "  $f"
+done
+echo ""
+
+if [ "$FORCE" = false ]; then
+  read -p "Remove these files and start fresh? [y/N] " -n 1 -r
+  echo ""
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Cancelled."
+    exit 0
+  fi
+fi
+
+for f in "${FILES[@]}"; do
+  [ -f "$f" ] && { rm "$f"; echo "  Removed $f"; }
+done
+if [ -d "vulns" ]; then
+  rm -rf "vulns"
+  echo "  Removed vulns/"
+fi
+
+echo ""
+echo "Vulnerability hunt state cleared. Run 'operator vuln' or 'operator vuln full' to start a new scan."

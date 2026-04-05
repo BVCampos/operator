@@ -1,0 +1,200 @@
+#!/bin/bash
+# enhance-verify — Verify all enhancement suggestions in parallel (one agent per section)
+# Usage: enhance-verify [--model MODEL] [--effort LEVEL]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+VERIFY_PROMPT="$PROMPTS_DIR/enhance-verify-phase.md"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "enhance-verify"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
+  case $1 in
+    --max)
+      echo "Note: --max is ignored. enhance-verify runs all sections in one parallel pass."
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: enhance-verify [--model MODEL] [--effort LEVEL] [--timeout MIN]"
+      echo ""
+      echo "Verifies all enhancement suggestions in parallel — one agent per section."
+      echo "Filters out suggestions that aren't worth the churn."
+      echo "Run after 'operator enhance', before 'operator enhance fix'."
+      echo ""
+      echo "Options:"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo ""
+      echo "Files:"
+      echo "  enhance-report.md            Input (required)"
+      echo "  enhance-report-verified.md   Output — suggestions with verdicts"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        echo "Note: iteration count is ignored. enhance-verify runs all sections in one parallel pass."
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+validate_env
+build_claude_cmd
+
+REPORT_FILE="$PROJECT_DIR/enhance-report.md"
+VERIFIED_FILE="$PROJECT_DIR/enhance-report-verified.md"
+
+if [ ! -f "$REPORT_FILE" ]; then
+  echo "Error: No enhance-report.md found."
+  echo "Run 'operator enhance' first to generate the enhancement report."
+  exit 1
+fi
+
+# Extract section headings from enhance report
+SECTIONS=()
+while IFS= read -r line; do
+  SECTIONS+=("$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')")
+done < <(grep "^## " "$REPORT_FILE")
+
+SECTION_COUNT=${#SECTIONS[@]}
+
+if [ "$SECTION_COUNT" -eq 0 ]; then
+  echo "Error: No sections found in enhance-report.md."
+  exit 1
+fi
+
+REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+
+echo "================================================"
+echo "  Enhance Verify — $SECTION_COUNT sections in parallel"
+echo "  Project:  $PROJECT_DIR"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+echo "  Report:   $REPORT_FILE ($REPORT_LINES lines)"
+echo "  Log:      $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started enhance-verify — $SECTION_COUNT sections in parallel"
+
+# Read the full report for cross-reference
+REPORT_CONTENT=$(cat "$REPORT_FILE")
+
+# Create temp directory for per-section prompts and outputs
+WORK_DIR=$(mktemp -d)
+trap "rm -rf '$WORK_DIR'" EXIT
+
+# Read the verify prompt template
+VERIFY_TEMPLATE=$(cat "$VERIFY_PROMPT")
+
+START_TIME=$(date +%s)
+
+# Launch one Claude instance per section
+PIDS=()
+for i in "${!SECTIONS[@]}"; do
+  section="${SECTIONS[$i]}"
+  idx=$((i + 1))
+
+  SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
+
+  # Build per-section prompt: template + section data
+  cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
+$VERIFY_TEMPLATE
+
+---
+
+## Section to verify (${idx} of ${SECTION_COUNT})
+
+**Section name:** $section
+
+### Suggestions to verify
+
+$SECTION_CONTENT
+
+### Full enhance report (for cross-reference / duplicate checking)
+
+$REPORT_CONTENT
+PROMPT_EOF
+
+  # Launch claude in background
+  command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1 &
+  PIDS+=($!)
+
+  log "  Launched verifier $idx/$SECTION_COUNT: $section (PID: $!)"
+done
+
+echo ""
+
+spin_all "Verifying suggestions" "$WORK_DIR" "${PIDS[@]}"
+
+# Wait for all processes and collect exit codes
+FAILURES=0
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || FAILURES=$((FAILURES + 1))
+done
+
+echo ""
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: verification stalled (no output for ${CLAUDE_TIMEOUT}m) — some sections may be incomplete"
+[ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had verification errors"
+
+# Combine results into verified report
+log "Combining verification results..."
+{
+  echo "# Codebase Enhancement Report — Verified"
+  echo ""
+  echo "Verified on $(date '+%Y-%m-%d %H:%M')"
+  echo ""
+
+  for i in "${!SECTIONS[@]}"; do
+    idx=$((i + 1))
+    section="${SECTIONS[$i]}"
+
+    if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+      cat "$WORK_DIR/output-$idx.md"
+      echo ""
+      echo "---"
+      echo ""
+
+      CONFIRMED=$(grep -ci "CONFIRMED" "$WORK_DIR/output-$idx.md" 2>/dev/null) || CONFIRMED=0
+      NOT_WORTH=$(grep -ci "NOT_WORTH_IT" "$WORK_DIR/output-$idx.md" 2>/dev/null) || NOT_WORTH=0
+      FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$WORK_DIR/output-$idx.md" 2>/dev/null) || FALSE_POS=0
+      log "  $section: $CONFIRMED confirmed, $NOT_WORTH not worth it, $FALSE_POS false positives"
+    else
+      log "  $section: no output (verification may have failed)"
+    fi
+  done
+} > "$VERIFIED_FILE"
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+# Final stats
+TOTAL_CONFIRMED=$(grep -ci "CONFIRMED" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_CONFIRMED=0
+TOTAL_NOT_WORTH=$(grep -ci "NOT_WORTH_IT" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_NOT_WORTH=0
+TOTAL_FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_FALSE_POS=0
+TOTAL_DUPES=$(grep -ci "DUPLICATE" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_DUPES=0
+TOTAL_RISKY=$(grep -ci "RISKY" "$VERIFIED_FILE" 2>/dev/null) || TOTAL_RISKY=0
+
+echo ""
+log "================================================"
+log "  Verification COMPLETE! ($(format_elapsed $ELAPSED))"
+log "  Sections verified: $SECTION_COUNT"
+log "  Confirmed:        $TOTAL_CONFIRMED"
+log "  Not worth it:     $TOTAL_NOT_WORTH"
+log "  False positives:  $TOTAL_FALSE_POS"
+log "  Duplicates:       $TOTAL_DUPES"
+log "  Risky:            $TOTAL_RISKY"
+log "  Report: $VERIFIED_FILE"
+log "================================================"

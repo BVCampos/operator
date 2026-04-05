@@ -1,0 +1,205 @@
+#!/bin/bash
+# enhance-loop — Systematically enhance the codebase section by section
+# Usage: enhance-loop [--max N] [--model MODEL] [--effort LEVEL]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+ENHANCE_PROMPT="$PROMPTS_DIR/enhance-phase.md"
+PLAN_PROMPT="$PROMPTS_DIR/enhance-plan-phase.md"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "enhance-loop"
+
+# Defaults
+MAX_ITERATIONS=20
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
+  case $1 in
+    --max)
+      MAX_ITERATIONS="$2"
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: enhance-loop [--max N] [--model MODEL] [--effort LEVEL] [--timeout MIN]"
+      echo ""
+      echo "Systematically analyzes the codebase for simplifications, performance"
+      echo "improvements, and modernization opportunities — section by section."
+      echo ""
+      echo "Options:"
+      echo "  --max N          Max iterations (default: 20)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo ""
+      echo "Files created in project root:"
+      echo "  enhance-progress.md   Tracks which sections have been analyzed"
+      echo "  enhance-report.md     Cumulative suggestions across all iterations"
+      echo ""
+      echo "The loop stops early if all sections are covered."
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        MAX_ITERATIONS="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+validate_env
+build_claude_cmd
+
+PROGRESS_FILE="$PROJECT_DIR/enhance-progress.md"
+REPORT_FILE="$PROJECT_DIR/enhance-report.md"
+
+# Count files in project for context
+TOTAL_FILES=$(git ls-files --cached --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+
+# Show existing progress if any
+if [ -f "$PROGRESS_FILE" ]; then
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+  PROGRESS_INFO="Resuming: $COVERED done, $REMAINING remaining"
+else
+  PROGRESS_INFO="Fresh enhance (no progress file)"
+fi
+
+echo "================================================"
+echo "  Enhance Loop — Max iterations: $MAX_ITERATIONS"
+echo "  Project:  $PROJECT_DIR"
+echo "  Branch:   $(git branch --show-current)"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+echo "  Files:    $TOTAL_FILES tracked files"
+echo "  Progress: $PROGRESS_INFO"
+echo "  Log:      $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started enhance-loop --max $MAX_ITERATIONS"
+log "Project: $PROJECT_DIR | Branch: $(git branch --show-current)"
+log "Total files: $TOTAL_FILES | $PROGRESS_INFO"
+
+START_TIME=$(date +%s)
+
+# ── Plan phase: map codebase into sections ────────────────────────
+if [ ! -f "$PROGRESS_FILE" ] && [ -f "$PLAN_PROMPT" ]; then
+  echo "==============================================================="
+  echo "  Plan Phase — Mapping codebase into sections"
+  echo "==============================================================="
+  echo ""
+
+  if run_claude "$PLAN_PROMPT" "Planning enhance sections"; then
+    OUTPUT="$CLAUDE_OUTPUT"
+    LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+    log "Plan output: $LINES lines"
+    echo ""
+    echo "$OUTPUT"
+    echo "$OUTPUT" >> "$LOG_FILE"
+
+    if [ -f "$PROGRESS_FILE" ]; then
+      COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+      REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+      log "Plan created: $REMAINING sections to analyze"
+    else
+      log "Warning: Plan phase did not create enhance-progress.md — enhance phase will create it"
+    fi
+  else
+    log "Plan phase stalled — enhance phase will create sections inline"
+  fi
+
+  echo ""
+fi
+
+for i in $(seq 1 $MAX_ITERATIONS); do
+  echo ""
+  echo "==============================================================="
+  echo "  Enhance iteration $i of $MAX_ITERATIONS"
+  echo "==============================================================="
+  echo ""
+
+  # Show current progress
+  if [ -f "$PROGRESS_FILE" ]; then
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+    log "Progress: $COVERED sections done, $REMAINING remaining"
+  fi
+
+  if ! run_claude "$ENHANCE_PROMPT" "Analyzing codebase"; then
+    log "Iteration $i stalled (no output for ${CLAUDE_TIMEOUT}m) — retrying"
+    sleep 2
+    continue
+  fi
+  OUTPUT="$CLAUDE_OUTPUT"
+
+  LINES=$(echo "$OUTPUT" | wc -l | tr -d ' ')
+  log "Enhance output: $LINES lines"
+
+  # Show the output
+  echo ""
+  echo "$OUTPUT"
+  echo "$OUTPUT" >> "$LOG_FILE"
+
+  # Check for completion
+  if echo "$OUTPUT" | grep -q "<enhance>COMPLETE</enhance>"; then
+    ELAPSED=$(( $(date +%s) - START_TIME ))
+
+    echo ""
+    log "================================================"
+    log "  Enhance COMPLETE!"
+    log "  All sections analyzed in $i iterations ($(format_elapsed $ELAPSED))"
+    log "================================================"
+
+    if [ -f "$REPORT_FILE" ]; then
+      log "Report: $REPORT_FILE"
+      log "Progress: $PROGRESS_FILE"
+    fi
+    exit 0
+  fi
+
+  # Show progress summary after each iteration
+  if [ -f "$PROGRESS_FILE" ]; then
+    echo ""
+    COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+    REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+    TOTAL_SECTIONS=$(( COVERED + REMAINING ))
+    log "Progress: $COVERED/$TOTAL_SECTIONS sections analyzed"
+  fi
+
+  if [ -f "$REPORT_FILE" ]; then
+    REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+    log "Report size: $REPORT_LINES lines"
+  fi
+
+  echo ""
+  log "Iteration $i complete."
+  sleep 2
+done
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+echo ""
+log "================================================"
+log "  Reached max iterations ($MAX_ITERATIONS)."
+log "  Total time: $(format_elapsed $ELAPSED)"
+if [ -f "$PROGRESS_FILE" ]; then
+  COVERED=$(grep -c "^\- \[x\]" "$PROGRESS_FILE" 2>/dev/null) || COVERED=0
+  REMAINING=$(grep -c "^\- \[ \]" "$PROGRESS_FILE" 2>/dev/null) || REMAINING=0
+  log "  Sections: $COVERED done, $REMAINING remaining"
+fi
+log "  Report: $REPORT_FILE"
+log "  Progress: $PROGRESS_FILE"
+log "  Full log: $LOG_FILE"
+log "================================================"
+exit 2

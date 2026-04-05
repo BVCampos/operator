@@ -1,0 +1,137 @@
+#!/bin/bash
+# vuln-loop-test — Run vuln-loop, vuln-triage, then vuln-test in sequence
+# Usage: vuln-loop-test [--max N] [--hunt-max N] [--model MODEL] [--effort LEVEL] [--skip-triage]
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+# Defaults
+HUNT_MAX=20
+TEST_MAX=0  # 0 = all sections
+SKIP_TRIAGE=false
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
+  case $1 in
+    --max)
+      HUNT_MAX="$2"
+      shift 2
+      ;;
+    --hunt-max)
+      HUNT_MAX="$2"
+      shift 2
+      ;;
+    --test-max)
+      TEST_MAX="$2"
+      shift 2
+      ;;
+    --skip-triage)
+      SKIP_TRIAGE=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: vuln-loop-test [--max N] [--hunt-max N] [--test-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-triage]"
+      echo ""
+      echo "Runs vuln-loop -> vuln-triage -> vuln-test in sequence."
+      echo ""
+      echo "Options:"
+      echo "  --max N          Set hunt max iterations (default: 20)"
+      echo "  --hunt-max N     Max hunt iterations (default: 20)"
+      echo "  --test-max N     Max sections to generate tests for (default: all)"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo "  --skip-triage    Skip the triage step (go straight from hunt to test)"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        HUNT_MAX="$1"
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+# Build common flags to forward to subscripts
+COMMON_FLAGS=""
+[ -n "$MODEL" ] && COMMON_FLAGS="$COMMON_FLAGS --model $MODEL"
+[ -n "$EFFORT" ] && COMMON_FLAGS="$COMMON_FLAGS --effort $EFFORT"
+[ "$CLAUDE_TIMEOUT" != "15" ] && COMMON_FLAGS="$COMMON_FLAGS --timeout $CLAUDE_TIMEOUT"
+
+echo "================================================"
+echo "  Vulnerability Hunt + Triage + Test Pipeline"
+echo "  Hunt:   up to $HUNT_MAX iterations"
+if [ "$SKIP_TRIAGE" = false ]; then
+  echo "  Triage: all sections in parallel"
+else
+  echo "  Triage: skipped"
+fi
+echo "  Test:   $([ "$TEST_MAX" -gt 0 ] && echo "up to $TEST_MAX sections" || echo "all sections") in parallel"
+[ -n "$MODEL" ] && echo "  Model:  $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort: $EFFORT"
+[ "$CLAUDE_TIMEOUT" != "15" ] && echo "  Stall:  kill after ${CLAUDE_TIMEOUT}m with no output"
+echo "================================================"
+echo ""
+
+START_TIME=$(date +%s)
+
+# Phase 1: Hunt
+echo "[$(date '+%H:%M:%S')] Phase 1: HUNT"
+echo ""
+$SCRIPT_DIR/vuln-loop --max $HUNT_MAX $COMMON_FLAGS && HUNT_EXIT=0 || HUNT_EXIT=$?
+
+echo ""
+echo "[$(date '+%H:%M:%S')] Hunt phase finished (exit: $HUNT_EXIT)"
+echo ""
+
+# Exit code 1 = actual error, exit code 2 = max iterations (continue anyway)
+if [ $HUNT_EXIT -eq 1 ]; then
+  echo "Hunt failed. Stopping."
+  exit 1
+fi
+
+if [ ! -f "./vuln-report.md" ]; then
+  echo "No vuln-report.md found. Stopping."
+  exit 1
+fi
+
+# Phase 2: Triage
+if [ "$SKIP_TRIAGE" = false ]; then
+  echo "[$(date '+%H:%M:%S')] Phase 2: TRIAGE"
+  echo ""
+  $SCRIPT_DIR/vuln-triage $COMMON_FLAGS && TRIAGE_EXIT=0 || TRIAGE_EXIT=$?
+
+  echo ""
+  echo "[$(date '+%H:%M:%S')] Triage phase finished (exit: $TRIAGE_EXIT)"
+  echo ""
+fi
+
+# Phase 3: Test
+echo "[$(date '+%H:%M:%S')] Phase 3: TEST"
+echo ""
+TEST_FLAGS=""
+[ "$TEST_MAX" -gt 0 ] && TEST_FLAGS="--max $TEST_MAX"
+$SCRIPT_DIR/vuln-test $TEST_FLAGS $COMMON_FLAGS && TEST_EXIT=0 || TEST_EXIT=$?
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+echo ""
+echo "================================================"
+echo "  [$(date '+%H:%M:%S')] Pipeline complete ($(format_elapsed $ELAPSED))"
+echo "  Reports:"
+echo "    vuln-report.md             Vulnerability findings"
+if [ "$SKIP_TRIAGE" = false ]; then
+  echo "    vuln-report-triaged.md     Triaged findings with repro steps"
+fi
+echo "    vulns/$(date +%Y-%m-%d)/           Per-section reports and tests"
+echo "================================================"

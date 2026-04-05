@@ -36,6 +36,8 @@ Assign exactly one verdict per finding:
 
 ## Output format
 
+Only include **CONFIRMED** and **WRONG_SEVERITY** findings in full detail. Dismissed findings (FALSE_POSITIVE, DUPLICATE, BY_DESIGN) go in a compact summary — one line each, no fix suggestions or analysis.
+
 Output the verified section in this format:
 
     ## [Section Name] — Verified YYYY-MM-DD
@@ -46,14 +48,16 @@ Output the verified section in this format:
        - Fix: original suggestion
        - Verdict reason: confirmed by reading the code
 
-    2. **[file:line]** [FALSE_POSITIVE] Description
-       - Verdict reason: code was refactored, issue no longer exists
-
     ### Important Issues (N confirmed / M original)
     ...
 
     ### Minor Issues (N confirmed / M original)
     ...
+
+    ### Dismissed (N findings)
+    - [FALSE_POSITIVE] file:line — one-line reason
+    - [DUPLICATE] file:line — duplicates [other finding ID]
+    - [BY_DESIGN] file:line — one-line reason
 
     ### Verification Summary
     - Confirmed: N

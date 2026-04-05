@@ -1,0 +1,234 @@
+#!/bin/bash
+# vuln-triage — Triage all vulnerability findings in parallel (one agent per section)
+# Usage: vuln-triage [--model MODEL] [--effort LEVEL]
+
+set -e
+
+OPERATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROMPTS_DIR="$OPERATOR_DIR/prompts"
+TRIAGE_PROMPT="$PROMPTS_DIR/vuln-triage-phase.md"
+
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+setup_log "vuln-triage"
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  if try_parse_common "$@"; then
+    shift $PARSED_SHIFT
+    continue
+  fi
+  case $1 in
+    --max)
+      echo "Note: --max is ignored. vuln-triage runs all sections in one parallel pass."
+      shift 2
+      ;;
+    -h|--help)
+      echo "Usage: vuln-triage [--model MODEL] [--effort LEVEL] [--timeout MIN]"
+      echo ""
+      echo "Triages all vulnerability findings in parallel — one agent per section."
+      echo "Verifies exploitability and writes reproduction steps."
+      echo "Run after 'operator vuln', before 'operator vuln test'."
+      echo ""
+      echo "Options:"
+      echo "  --model MODEL    Claude model to use (e.g., sonnet, opus)"
+      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
+      echo ""
+      echo "Files:"
+      echo "  vuln-report.md             Input (required)"
+      echo "  vuln-report-triaged.md     Output — findings with verdicts and repro steps"
+      exit 0
+      ;;
+    *)
+      if [[ "$1" =~ ^[0-9]+$ ]]; then
+        echo "Note: iteration count is ignored. vuln-triage runs all sections in one parallel pass."
+      else
+        echo "Unknown option: $1"
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+validate_env
+build_claude_cmd
+
+REPORT_FILE="$PROJECT_DIR/vuln-report.md"
+TRIAGED_FILE="$PROJECT_DIR/vuln-report-triaged.md"
+
+if [ ! -f "$REPORT_FILE" ]; then
+  echo "Error: No vuln-report.md found."
+  echo "Run 'operator vuln' first to generate the vulnerability report."
+  exit 1
+fi
+
+# Extract section headings from vuln report
+SECTIONS=()
+while IFS= read -r line; do
+  SECTIONS+=("$(echo "$line" | sed 's/^## //' | sed 's/ — .*//')")
+done < <(grep "^## " "$REPORT_FILE")
+
+SECTION_COUNT=${#SECTIONS[@]}
+
+if [ "$SECTION_COUNT" -eq 0 ]; then
+  echo "Error: No sections found in vuln-report.md."
+  exit 1
+fi
+
+REPORT_LINES=$(wc -l < "$REPORT_FILE" | tr -d ' ')
+
+echo "================================================"
+echo "  Vulnerability Triage — $SECTION_COUNT sections in parallel"
+echo "  Project:  $PROJECT_DIR"
+[ -n "$MODEL" ] && echo "  Model:    $MODEL"
+[ -n "$EFFORT" ] && echo "  Effort:   $EFFORT"
+echo "  Stall:    kill after ${CLAUDE_TIMEOUT}m with no output"
+echo "  Report:   $REPORT_FILE ($REPORT_LINES lines)"
+echo "  Log:      $LOG_FILE"
+echo "================================================"
+echo ""
+log "Started vuln-triage — $SECTION_COUNT sections in parallel"
+
+# Read the full report for cross-reference
+REPORT_CONTENT=$(cat "$REPORT_FILE")
+
+# Create temp directory for per-section prompts and outputs
+WORK_DIR=$(mktemp -d)
+trap "rm -rf '$WORK_DIR'" EXIT
+
+# Read the triage prompt template
+TRIAGE_TEMPLATE=$(cat "$TRIAGE_PROMPT")
+
+START_TIME=$(date +%s)
+
+# Launch one Claude instance per section
+PIDS=()
+for i in "${!SECTIONS[@]}"; do
+  section="${SECTIONS[$i]}"
+  idx=$((i + 1))
+
+  SECTION_CONTENT=$(extract_section "$REPORT_FILE" "$section")
+
+  # Also include per-section vuln report if it exists
+  VULN_DIR="$PROJECT_DIR/vulns/$(date +%Y-%m-%d)"
+  SECTION_SLUG=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+  DETAILED_REPORT=""
+  if [ -f "$VULN_DIR/$SECTION_SLUG.vuln.md" ]; then
+    DETAILED_REPORT=$(cat "$VULN_DIR/$SECTION_SLUG.vuln.md")
+  fi
+
+  # Build per-section prompt: template + section data
+  cat > "$WORK_DIR/prompt-$idx.md" <<PROMPT_EOF
+$TRIAGE_TEMPLATE
+
+---
+
+## Section to triage (${idx} of ${SECTION_COUNT})
+
+**Section name:** $section
+
+### Findings to triage
+
+$SECTION_CONTENT
+PROMPT_EOF
+
+  if [ -n "$DETAILED_REPORT" ]; then
+    cat >> "$WORK_DIR/prompt-$idx.md" <<DETAIL_EOF
+
+### Detailed vulnerability report
+
+$DETAILED_REPORT
+DETAIL_EOF
+  fi
+
+  cat >> "$WORK_DIR/prompt-$idx.md" <<FULL_EOF
+
+### Full vulnerability report (for cross-reference / duplicate checking)
+
+$REPORT_CONTENT
+FULL_EOF
+
+  # Launch claude in background
+  command $CLAUDE_CMD < "$WORK_DIR/prompt-$idx.md" > "$WORK_DIR/output-$idx.md" 2>&1 &
+  PIDS+=($!)
+
+  log "  Launched triage $idx/$SECTION_COUNT: $section (PID: $!)"
+done
+
+echo ""
+
+spin_all "Triaging findings" "$WORK_DIR" "${PIDS[@]}"
+
+# Wait for all processes and collect exit codes
+FAILURES=0
+for pid in "${PIDS[@]}"; do
+  wait "$pid" || FAILURES=$((FAILURES + 1))
+done
+
+echo ""
+[ "$SPIN_TIMED_OUT" = true ] && log "Warning: triage stalled (no output for ${CLAUDE_TIMEOUT}m) — some sections may be incomplete"
+[ $FAILURES -gt 0 ] && log "Warning: $FAILURES section(s) had triage errors"
+
+# Combine results into triaged report
+log "Combining triage results..."
+{
+  echo "# Vulnerability Report — Triaged"
+  echo ""
+  echo "Triaged on $(date '+%Y-%m-%d %H:%M')"
+  echo ""
+
+  for i in "${!SECTIONS[@]}"; do
+    idx=$((i + 1))
+    section="${SECTIONS[$i]}"
+
+    if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+      cat "$WORK_DIR/output-$idx.md"
+      echo ""
+      echo "---"
+      echo ""
+
+      EXPLOITABLE=$(grep -ci "EXPLOITABLE" "$WORK_DIR/output-$idx.md" 2>/dev/null) || EXPLOITABLE=0
+      FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$WORK_DIR/output-$idx.md" 2>/dev/null) || FALSE_POS=0
+      THEORETICAL=$(grep -ci "THEORETICAL" "$WORK_DIR/output-$idx.md" 2>/dev/null) || THEORETICAL=0
+      log "  $section: $EXPLOITABLE exploitable, $THEORETICAL theoretical, $FALSE_POS false positives"
+    else
+      log "  $section: no output (triage may have failed)"
+    fi
+  done
+} > "$TRIAGED_FILE"
+
+# Also write per-section triage files to vulns/ directory
+VULN_DIR="$PROJECT_DIR/vulns/$(date +%Y-%m-%d)"
+mkdir -p "$VULN_DIR"
+for i in "${!SECTIONS[@]}"; do
+  idx=$((i + 1))
+  section="${SECTIONS[$i]}"
+  SECTION_SLUG=$(echo "$section" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+  if [ -f "$WORK_DIR/output-$idx.md" ] && [ -s "$WORK_DIR/output-$idx.md" ]; then
+    cp "$WORK_DIR/output-$idx.md" "$VULN_DIR/$SECTION_SLUG.triage.md"
+  fi
+done
+
+ELAPSED=$(( $(date +%s) - START_TIME ))
+
+# Final stats
+TOTAL_EXPLOITABLE=$(grep -ci "EXPLOITABLE" "$TRIAGED_FILE" 2>/dev/null) || TOTAL_EXPLOITABLE=0
+TOTAL_FALSE_POS=$(grep -ci "FALSE_POSITIVE" "$TRIAGED_FILE" 2>/dev/null) || TOTAL_FALSE_POS=0
+TOTAL_THEORETICAL=$(grep -ci "THEORETICAL" "$TRIAGED_FILE" 2>/dev/null) || TOTAL_THEORETICAL=0
+TOTAL_DUPES=$(grep -ci "DUPLICATE" "$TRIAGED_FILE" 2>/dev/null) || TOTAL_DUPES=0
+TOTAL_ACCEPTED=$(grep -ci "ACCEPTED_RISK" "$TRIAGED_FILE" 2>/dev/null) || TOTAL_ACCEPTED=0
+
+echo ""
+log "================================================"
+log "  Triage COMPLETE! ($(format_elapsed $ELAPSED))"
+log "  Sections triaged: $SECTION_COUNT"
+log "  Exploitable:      $TOTAL_EXPLOITABLE"
+log "  Theoretical:      $TOTAL_THEORETICAL"
+log "  False positives:  $TOTAL_FALSE_POS"
+log "  Duplicates:       $TOTAL_DUPES"
+log "  Accepted risk:    $TOTAL_ACCEPTED"
+log "  Report: $TRIAGED_FILE"
+log "  Details: $VULN_DIR/"
+log "================================================"

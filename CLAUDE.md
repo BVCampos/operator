@@ -17,6 +17,14 @@ Operator is a CLI tool that wraps `claude --print` in bash loops to run autonomo
 - `operator audit verify` → `bin/audit-verify`
 - `operator audit fix` → `bin/audit-fix`
 - `operator audit full` → `bin/audit-loop-fix` (orchestrates audit → verify → fix)
+- `operator enhance` → `bin/enhance-loop`
+- `operator enhance verify` → `bin/enhance-verify`
+- `operator enhance fix` → `bin/enhance-fix`
+- `operator enhance full` → `bin/enhance-loop-fix` (orchestrates enhance → verify → fix)
+- `operator vuln` → `bin/vuln-loop`
+- `operator vuln triage` → `bin/vuln-triage`
+- `operator vuln test` → `bin/vuln-test`
+- `operator vuln full` → `bin/vuln-loop-test` (orchestrates hunt → triage → test)
 - `operator ralph <start|status|logs|stop|clean>` → `bin/ralph-*`
 
 ### Shared library
@@ -25,6 +33,7 @@ Operator is a CLI tool that wraps `claude --print` in bash loops to run autonomo
 - `log()` — writes to stdout and appends to `$LOG_FILE` (if set)
 - `setup_log <name>` — initializes `$LOG_DIR` and `$LOG_FILE` for a named script
 - `spin()` — braille spinner showing elapsed time while a background process runs
+- `merge_parallel_branches <prefix> <label>` — two-pass merge for parallel worktree branches (see design principles)
 
 ### Loop pattern
 
@@ -60,8 +69,24 @@ Every loop script follows the same structure:
 
 **Audit fix (contract → generator → evaluator pattern):**
 - `audit-fix-contract-phase.md` — (contract) generates sprint contracts defining DONE-when, VERIFY-by, and REGRESSION-check conditions per finding before any fixes start. Writes `audit-fix-contracts.md`.
-- `audit-fix-phase.md` — (generator) single-section fix instructions with contract verification. The bash script launches one Claude instance per section in parallel worktrees, each fixing and committing independently. Each section runs tsc, lint, prettier, and related tests on changed files before committing.
-- `audit-fix-repair-phase.md` — (evaluator) post-merge repair instructions. If tsc/lint/prettier/tests fail after merging all sections, Claude is launched to fix the breakages (up to `--max-repairs` iterations, default 3).
+- `audit-fix-phase.md` — (generator) single-section fix instructions with contract verification. By default runs sequentially (one section at a time on the current branch). With `--parallel`, launches one Claude instance per section in parallel worktrees. Each section runs tsc, lint, prettier, and related tests on changed files before committing.
+- `audit-fix-repair-phase.md` — (evaluator) post-merge repair instructions. If tsc/lint/prettier/tests fail after all sections are fixed, Claude is launched to fix the breakages (up to `--max-repairs` iterations, default 3).
+
+**Enhance loop (planner → generator → evaluator pattern):**
+- `enhance-plan-phase.md` — (planner) maps codebase into sections ordered by improvement density, collects baseline metrics (LOC, type safety issues, TODO counts). Creates `enhance-progress.md`.
+- `enhance-phase.md` — (generator) analyzes one section per iteration using 3 parallel agents (simplifier, optimizer, modernizer), appends to `enhance-report.md`. Each agent has strict rules: simplifier must verify dead code with grep, optimizer must cite measurable impact, modernizer must verify feature availability.
+- `enhance-verify-phase.md` — (evaluator) higher bar than audit verify — must confirm the improvement justifies the churn (diff size vs value). Uses verdicts: CONFIRMED, NOT_WORTH_IT, FALSE_POSITIVE, DUPLICATE, RISKY, WRONG_IMPACT.
+
+**Enhance fix (contract → generator → evaluator pattern):**
+- `enhance-fix-contract-phase.md` — (contract) generates verification contracts with quantitative criteria (LOC reduction, function elimination, dependency removal). Every contract must include a measurable condition.
+- `enhance-fix-phase.md` — (generator) implements enhancements. By default runs sequentially (one section at a time). With `--parallel`, uses parallel worktrees. Measures before/after LOC. Commit messages use `enhance:` prefix instead of `fix(audit):`.
+- `enhance-fix-repair-phase.md` — (evaluator) post-merge repair. May revert individual enhancements if repair would require workaround code.
+
+**Vulnerability hunt (planner → generator → evaluator → test pattern):**
+- `vuln-plan-phase.md` — (planner) maps codebase into sections ordered by attack surface (auth/input first, then data/crypto, then supporting code). Creates `vuln-progress.md`.
+- `vuln-phase.md` — (generator) scans one section per iteration using 3 parallel security agents (injection hunter, auth/access hunter, data/crypto hunter). Writes per-section reports to `vulns/YYYY-MM-DD/[section].vuln.md` and appends to `vuln-report.md`. Each agent requires concrete attack vectors, not theoretical concerns.
+- `vuln-triage-phase.md` — (evaluator) verifies exploitability for a single section (the bash script launches one Claude instance per section in parallel). Uses verdicts: EXPLOITABLE, THEORETICAL, FALSE_POSITIVE, DUPLICATE, ACCEPTED_RISK. Writes reproduction steps for exploitable findings to `vulns/YYYY-MM-DD/[section].triage.md`.
+- `vuln-test-phase.md` — (test writer) generates security regression tests for confirmed vulnerabilities. Writes two test types per finding: vulnerability proof (passes now, fails after fix) and fix validation (fails now, passes after fix). Outputs to `vulns/YYYY-MM-DD/[section].test.*`.
 
 ### State files
 
@@ -92,13 +117,18 @@ Inspired by [Anthropic's harness design guide](https://www.anthropic.com/enginee
 - **Gradable criteria**: The review verify phase uses a 0-10 scoring rubric (Correctness, Minimality, Safety, Completeness) instead of binary pass/fail. Threshold-based decisions (default: >= 7/10).
 - **Planner separation**: The audit plan phase maps the codebase into sections separately from auditing. Planning and execution are different cognitive tasks.
 - **Metrics tracking**: Changelogs include quantitative metrics (false positive rates, repair iterations, score distributions) to enable data-driven decisions about which phases are still load-bearing.
+- **Sequential by default**: Fix phases (`audit-fix`, `enhance-fix`) run sections sequentially on the current branch. Each section builds on the previous one's changes — no worktrees, no merge conflicts. Parallel mode (`--parallel`) is opt-in for speed but uses a two-pass merge strategy (cherry-pick with commit + re-run conflicting sections) to handle overlapping changes.
 
 ## Development notes
 
 - All scripts use `set -e` and `#!/bin/bash`
 - Scripts accept `--max N` or a bare number as iteration limit (except `audit-verify` which always runs one parallel pass)
-- `audit-fix` and `audit-verify` run all sections in parallel (one Claude instance per section). `audit-fix` uses git worktrees for isolation, cherry-picks commits back, runs tsc + lint + prettier + tests on the combined result, and auto-repairs any failures (disable with `--no-repair`)
+- `audit-fix` runs sections sequentially by default (one at a time on the current branch). Pass `--parallel [N]` to use worktrees with N concurrent Claude instances (default 5). `audit-verify` always runs one parallel pass
 - `audit-fix` and `audit-loop-fix` accept `--model MODEL` to use a faster Claude model (e.g., `sonnet`) for the fix phase
 - `audit-fix` accepts `--skip-contracts` to bypass sprint contract generation
 - `review-loop` accepts `--skip-verify` to bypass independent verification and `--verify-threshold N` to adjust the pass score (default: 7)
-- Completion signals are XML-style tags in Claude's output (e.g., `<audit>COMPLETE</audit>`, `<verify>PASS</verify>`)
+- `enhance-fix` runs sections sequentially by default, same as audit-fix. Pass `--parallel [N]` for parallel mode. `enhance-verify` always runs one parallel pass
+- `enhance-fix` and `enhance-loop-fix` accept `--model MODEL` and `--skip-contracts`
+- `vuln-triage` and `vuln-test` always run one parallel pass (one agent per section)
+- `vuln-loop-test` accepts `--skip-triage` to go straight from hunt to test generation
+- Completion signals are XML-style tags in Claude's output (e.g., `<audit>COMPLETE</audit>`, `<enhance>COMPLETE</enhance>`, `<vuln>COMPLETE</vuln>`, `<verify>PASS</verify>`)

@@ -1,6 +1,6 @@
 #!/bin/bash
-# audit-loop-fix — Run audit-loop, audit-verify, then audit-fix in sequence
-# Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--skip-verify]
+# enhance-loop-fix — Run enhance-loop, enhance-verify, then enhance-fix in sequence
+# Usage: enhance-loop-fix [--max N] [--enhance-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--skip-verify]
 
 set -e
 
@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
 # Defaults
-AUDIT_MAX=20
+ENHANCE_MAX=20
 FIX_MAX=20
 SKIP_VERIFY=false
 SKIP_CONTRACTS=false
@@ -26,12 +26,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --max)
-      AUDIT_MAX="$2"
+      ENHANCE_MAX="$2"
       FIX_MAX="$2"
       shift 2
       ;;
-    --audit-max)
-      AUDIT_MAX="$2"
+    --enhance-max)
+      ENHANCE_MAX="$2"
       shift 2
       ;;
     --verify-max)
@@ -51,25 +51,25 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -h|--help)
-      echo "Usage: audit-loop-fix [--max N] [--audit-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-verify] [--skip-contracts]"
+      echo "Usage: enhance-loop-fix [--max N] [--enhance-max N] [--fix-max N] [--model MODEL] [--effort LEVEL] [--timeout MIN] [--skip-verify] [--skip-contracts]"
       echo ""
-      echo "Runs audit-loop → audit-verify → audit-fix in sequence."
+      echo "Runs enhance-loop -> enhance-verify -> enhance-fix in sequence."
       echo ""
       echo "Options:"
-      echo "  --max N          Set audit and fix max values (default: 20)"
-      echo "  --audit-max N    Max audit iterations (default: 20)"
-      echo "  --fix-max N      Max fix iterations (default: 20)"
-      echo "  --commit         Commit fixes automatically (default: no commit, changes left staged)"
-      echo "  --model MODEL    Claude model to use (e.g., sonnet)"
-      echo "  --effort LEVEL   Thinking effort: low, medium, high, max"
-      echo "  --timeout MIN    Kill claude after MIN minutes with no output (default: 15)"
-      echo "  --skip-verify    Skip the verification step"
-      echo "  --skip-contracts Skip sprint contract generation before fixing"
+      echo "  --max N              Set enhance and fix max values (default: 20)"
+      echo "  --enhance-max N      Max enhance iterations (default: 20)"
+      echo "  --fix-max N          Max fix iterations (default: 20)"
+      echo "  --commit             Commit progress automatically (default: no commit, changes left staged)"
+      echo "  --model MODEL        Claude model to use (e.g., sonnet)"
+      echo "  --effort LEVEL       Thinking effort: low, medium, high, max"
+      echo "  --timeout MIN        Kill claude after MIN minutes with no output (default: 15)"
+      echo "  --skip-verify        Skip the verification step"
+      echo "  --skip-contracts     Skip verification contract generation before implementing"
       exit 0
       ;;
     *)
       if [[ "$1" =~ ^[0-9]+$ ]]; then
-        AUDIT_MAX="$1"
+        ENHANCE_MAX="$1"
         FIX_MAX="$1"
       else
         echo "Unknown option: $1"
@@ -87,14 +87,14 @@ COMMON_FLAGS=""
 [ "$CLAUDE_TIMEOUT" != "15" ] && COMMON_FLAGS="$COMMON_FLAGS --timeout $CLAUDE_TIMEOUT"
 
 echo "================================================"
-echo "  Audit + Verify + Fix Pipeline"
-echo "  Audit:  up to $AUDIT_MAX iterations"
+echo "  Enhance + Verify + Fix Pipeline"
+echo "  Enhance: up to $ENHANCE_MAX iterations"
 if [ "$SKIP_VERIFY" = false ]; then
-  echo "  Verify: all sections in parallel"
+  echo "  Verify:  all sections in parallel"
 else
-  echo "  Verify: skipped"
+  echo "  Verify:  skipped"
 fi
-echo "  Fix:    up to $FIX_MAX sections (sequential)"
+echo "  Fix:     up to $FIX_MAX sections (sequential)"
 if [ "$SKIP_CONTRACTS" = false ]; then
   echo "  Contracts: enabled"
 else
@@ -109,23 +109,23 @@ echo ""
 
 START_TIME=$(date +%s)
 
-# Phase 1: Audit
-echo "[$(date '+%H:%M:%S')] Phase 1: AUDIT"
+# Phase 1: Enhance
+echo "[$(date '+%H:%M:%S')] Phase 1: ENHANCE"
 echo ""
-$SCRIPT_DIR/audit-loop --max $AUDIT_MAX $COMMON_FLAGS && AUDIT_EXIT=0 || AUDIT_EXIT=$?
+$SCRIPT_DIR/enhance-loop --max $ENHANCE_MAX $COMMON_FLAGS && ENHANCE_EXIT=0 || ENHANCE_EXIT=$?
 
 echo ""
-echo "[$(date '+%H:%M:%S')] Audit phase finished (exit: $AUDIT_EXIT)"
+echo "[$(date '+%H:%M:%S')] Enhance phase finished (exit: $ENHANCE_EXIT)"
 echo ""
 
 # Exit code 1 = actual error, exit code 2 = max iterations (continue anyway)
-if [ $AUDIT_EXIT -eq 1 ]; then
-  echo "Audit failed. Stopping."
+if [ $ENHANCE_EXIT -eq 1 ]; then
+  echo "Enhance failed. Stopping."
   exit 1
 fi
 
-if [ ! -f "./audit-report.md" ]; then
-  echo "No audit-report.md found. Stopping."
+if [ ! -f "./enhance-report.md" ]; then
+  echo "No enhance-report.md found. Stopping."
   exit 1
 fi
 
@@ -133,7 +133,7 @@ fi
 if [ "$SKIP_VERIFY" = false ]; then
   echo "[$(date '+%H:%M:%S')] Phase 2: VERIFY"
   echo ""
-  $SCRIPT_DIR/audit-verify $COMMON_FLAGS && VERIFY_EXIT=0 || VERIFY_EXIT=$?
+  $SCRIPT_DIR/enhance-verify $COMMON_FLAGS && VERIFY_EXIT=0 || VERIFY_EXIT=$?
 
   echo ""
   echo "[$(date '+%H:%M:%S')] Verify phase finished (exit: $VERIFY_EXIT)"
@@ -145,7 +145,7 @@ echo "[$(date '+%H:%M:%S')] Phase 3: FIX"
 echo ""
 CONTRACT_FLAG=""
 [ "$SKIP_CONTRACTS" = true ] && CONTRACT_FLAG="--skip-contracts"
-$SCRIPT_DIR/audit-fix --max $FIX_MAX $COMMIT_FLAG $CONTRACT_FLAG $COMMON_FLAGS && FIX_EXIT=0 || FIX_EXIT=$?
+$SCRIPT_DIR/enhance-fix --max $FIX_MAX $COMMIT_FLAG $CONTRACT_FLAG $COMMON_FLAGS && FIX_EXIT=0 || FIX_EXIT=$?
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
 
@@ -153,10 +153,10 @@ echo ""
 echo "================================================"
 echo "  [$(date '+%H:%M:%S')] Pipeline complete ($(format_elapsed $ELAPSED))"
 echo "  Reports:"
-echo "    audit-report.md            Findings"
+echo "    enhance-report.md            Suggestions"
 if [ "$SKIP_VERIFY" = false ]; then
-  echo "    audit-report-verified.md   Verified findings"
+  echo "    enhance-report-verified.md   Verified suggestions"
 fi
-echo "    audit-fix-contracts.md     Verification contracts"
-echo "    audit-fix-changelog.md     Fixes applied"
+echo "    enhance-fix-contracts.md     Verification contracts"
+echo "    enhance-fix-changelog.md     Changes applied"
 echo "================================================"
